@@ -119,12 +119,12 @@ test_repos_list_help() {
 
     exec_run "$DSR_CMD" repos list --help
 
-    # repos list --help may show main repos help or subcommand help
-    if exec_stdout_contains "repos" || exec_stdout_contains "USAGE"; then
-        pass "repos list --help shows usage"
+    # repos list --help runs the command (no subcommand help), output goes to stderr
+    if exec_stderr_contains "repos" || exec_stderr_contains "No repositories"; then
+        pass "repos list --help shows output"
     else
-        fail "repos list --help should show usage"
-        echo "stdout: $(exec_stdout | head -5)"
+        fail "repos list --help should show output"
+        echo "stderr: $(exec_stderr | head -5)"
     fi
 
     harness_teardown
