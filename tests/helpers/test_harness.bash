@@ -24,6 +24,8 @@ source "$HARNESS_DIR/mock_time.bash"
 source "$HARNESS_DIR/mock_random.bash"
 source "$HARNESS_DIR/log_capture.bash"
 source "$HARNESS_DIR/mock_common.bash"
+source "$HARNESS_DIR/test_skip.bash"
+source "$HARNESS_DIR/test_exec.bash"
 
 # Export project root for tests
 export DSR_PROJECT_ROOT="$PROJECT_ROOT"
@@ -69,6 +71,12 @@ harness_setup() {
   # Initialize log capture
   log_capture_init "$_HARNESS_TMPDIR/test.log"
 
+  # Initialize exec logging
+  exec_init "$_HARNESS_TMPDIR"
+
+  # Reset skip state
+  skip_reset
+
   # Freeze time to known value (noon on Jan 30, 2026)
   mock_time_freeze "2026-01-30T12:00:00Z"
 
@@ -110,6 +118,12 @@ harness_teardown() {
   mock_time_restore_date 2>/dev/null || true
   mock_random_reset
   mock_cleanup
+
+  # Cleanup exec logging
+  exec_cleanup
+
+  # Print skip summary if any tests were skipped
+  skip_summary
 
   # Cleanup log capture
   log_capture_cleanup
