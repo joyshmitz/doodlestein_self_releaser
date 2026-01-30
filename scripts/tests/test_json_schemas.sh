@@ -103,6 +103,44 @@ validate_with_jq() {
     return 0
 }
 
+validate_manifest_with_jq() {
+    local fixture="$1"
+
+    local errors=()
+
+    # Required manifest fields
+    local required_fields=("schema_version" "tool" "version" "run_id" "git_sha" "built_at" "artifacts")
+    for field in "${required_fields[@]}"; do
+        if ! jq -e ".$field" "$fixture" &>/dev/null; then
+            errors+=("Missing required field: $field")
+        fi
+    done
+
+    # Validate schema_version
+    local schema_version
+    schema_version=$(jq -r '.schema_version' "$fixture" 2>/dev/null)
+    if [[ "$schema_version" != "1.0.0" ]]; then
+        errors+=("schema_version must be 1.0.0 (got: $schema_version)")
+    fi
+
+    # Validate artifacts structure
+    if jq -e '.artifacts | length > 0' "$fixture" &>/dev/null; then
+        if ! jq -e '.artifacts[0].name and .artifacts[0].target and .artifacts[0].sha256 and .artifacts[0].size_bytes' "$fixture" &>/dev/null; then
+            errors+=("Artifacts missing required fields (name, target, sha256, size_bytes)")
+        fi
+    else
+        errors+=("artifacts must be a non-empty array")
+    fi
+
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        for err in "${errors[@]}"; do
+            echo "  - $err" >&2
+        done
+        return 1
+    fi
+    return 0
+}
+
 validate_fixture() {
     local fixture="$1"
     local fixture_name
@@ -110,14 +148,33 @@ validate_fixture() {
 
     # Determine which detail schema to use based on command
     local command
-    command=$(jq -r '.command' "$fixture" 2>/dev/null)
+    command=$(jq -r '.command // empty' "$fixture" 2>/dev/null)
+    local is_manifest=false
+    if [[ -z "$command" ]]; then
+        if jq -e '.schema_version and .artifacts' "$fixture" &>/dev/null 2>&1; then
+            is_manifest=true
+        fi
+    fi
     local detail_schema="$SCHEMAS_DIR/${command}-details.json"
 
     echo ""
-    log_info "Validating: $fixture_name (command: $command)"
+    if $is_manifest; then
+        log_info "Validating: $fixture_name (manifest schema)"
+    else
+        log_info "Validating: $fixture_name (command: $command)"
+    fi
 
     # Validate against envelope schema
     if $use_ajv; then
+        if $is_manifest; then
+            if validate_with_ajv "$fixture" "$SCHEMAS_DIR/manifest.json"; then
+                log_pass "Manifest schema validation"
+            else
+                log_fail "Manifest schema validation"
+            fi
+            return
+        fi
+
         if validate_with_ajv "$fixture" "$SCHEMAS_DIR/envelope.json"; then
             log_pass "Envelope schema validation"
         else
@@ -141,10 +198,18 @@ validate_fixture() {
         fi
     else
         # Fall back to jq validation
-        if validate_with_jq "$fixture" "envelope"; then
-            log_pass "Basic structure validation"
+        if $is_manifest; then
+            if validate_manifest_with_jq "$fixture"; then
+                log_pass "Manifest structure validation"
+            else
+                log_fail "Manifest structure validation"
+            fi
         else
-            log_fail "Basic structure validation"
+            if validate_with_jq "$fixture" "envelope"; then
+                log_pass "Basic structure validation"
+            else
+                log_fail "Basic structure validation"
+            fi
         fi
     fi
 }
@@ -158,6 +223,13 @@ test_exit_code_consistency() {
         [[ -f "$fixture" ]] || continue
         local fixture_name
         fixture_name=$(basename "$fixture")
+
+        local command
+        command=$(jq -r '.command // empty' "$fixture")
+        if [[ -z "$command" ]]; then
+            log_skip "$fixture_name: no command field (not an envelope fixture)"
+            continue
+        fi
 
         local status exit_code
         status=$(jq -r '.status' "$fixture")
@@ -194,6 +266,13 @@ test_timestamp_format() {
         [[ -f "$fixture" ]] || continue
         local fixture_name
         fixture_name=$(basename "$fixture")
+
+        local command
+        command=$(jq -r '.command // empty' "$fixture")
+        if [[ -z "$command" ]]; then
+            log_skip "$fixture_name: no started_at field (not an envelope fixture)"
+            continue
+        fi
 
         local started_at
         started_at=$(jq -r '.started_at' "$fixture")
