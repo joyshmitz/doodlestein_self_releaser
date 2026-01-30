@@ -76,6 +76,9 @@ check_go() {
     local version
     if [[ "$host" == "wlap" ]]; then
         version=$(get_remote_version "$host" "go" "go version")
+    elif [[ "$host" == "mmini" ]]; then
+        # macOS may have Go in /usr/local/go/bin
+        version=$(get_remote_version "$host" "go" "/usr/local/go/bin/go version 2>/dev/null || go version")
     else
         version=$(get_remote_version "$host" "go" "go version")
     fi
@@ -104,7 +107,10 @@ check_bun() {
 
     local version
     if [[ "$host" == "wlap" ]]; then
-        version=$(get_remote_version "$host" "bun" "bun --version 2>nul")
+        version=$(get_remote_version "$host" "bun" 'cmd /c "set PATH=%USERPROFILE%\.bun\bin;%PATH% && bun --version" 2>nul')
+    elif [[ "$host" == "mmini" ]]; then
+        # macOS bun installs to ~/.bun/bin
+        version=$(get_remote_version "$host" "bun" "~/.bun/bin/bun --version 2>/dev/null || bun --version")
     else
         version=$(get_remote_version "$host" "bun" "bun --version")
     fi
