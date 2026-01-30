@@ -62,7 +62,7 @@ selector_get_limit() {
     fi
 
     local limit
-    limit=$(yq -r ".hosts.${hostname}.max_parallel // $_SELECTOR_DEFAULT_MAX_PARALLEL" "$hosts_file" 2>/dev/null)
+    limit=$(yq -r ".hosts.${hostname}.concurrency // $_SELECTOR_DEFAULT_MAX_PARALLEL" "$hosts_file" 2>/dev/null)
     echo "${limit:-$_SELECTOR_DEFAULT_MAX_PARALLEL}"
 }
 

@@ -252,7 +252,7 @@ build_lock_info() {
   "age_seconds": $age,
   "run_id": "$lock_run_id",
   "process_alive": $alive,
-  "stale": $(( age > BUILD_LOCK_STALE_THRESHOLD ? 1 : 0 ))
+  "stale": $([ "$age" -gt "$BUILD_LOCK_STALE_THRESHOLD" ] && echo true || echo false)
 }
 EOF
   else

@@ -39,6 +39,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source modules (logging first, others may depend on it)
 source "$SCRIPT_DIR/src/logging.sh"
 source "$SCRIPT_DIR/src/config.sh"
+source "$SCRIPT_DIR/src/secrets.sh"
+source "$SCRIPT_DIR/src/notify.sh"
 source "$SCRIPT_DIR/src/signing.sh"
 source "$SCRIPT_DIR/src/github.sh"
 source "$SCRIPT_DIR/src/host_health.sh"
@@ -1126,6 +1128,12 @@ _watch_iteration() {
         fi
 
         log_warn "Throttled run detected: $run_id ($repo)"
+        if [[ "${DSR_NOTIFY_ENABLED:-false}" == "true" ]]; then
+            notify_event "watch.throttled" "warn" \
+                "Throttle detected" \
+                "Repo $repo run $run_id exceeded threshold" \
+                "$run_id" || true
+        fi
 
         if $dry_run; then
             log_info "[DRY RUN] Would trigger fallback for $repo (run $run_id)"
@@ -1139,6 +1147,12 @@ _watch_iteration() {
             # For now, just log that we would trigger it
             log_info "Fallback queued for $repo (run $run_id)"
             # ./dsr fallback --repo "$repo" &
+            if [[ "${DSR_NOTIFY_ENABLED:-false}" == "true" ]]; then
+                notify_event "watch.fallback_queued" "info" \
+                    "Fallback queued" \
+                    "Repo $repo run $run_id queued for fallback" \
+                    "$run_id" || true
+            fi
         fi
 
         ((triggered_count++))
@@ -1156,6 +1170,7 @@ cmd_watch() {
     local daemon_mode=false
     local dry_run=false
     local once_mode=false
+    local notify_methods="none"
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -1163,6 +1178,14 @@ cmd_watch() {
             --interval|-i)
                 interval="$2"
                 shift 2
+                ;;
+            --notify)
+                notify_methods="$2"
+                shift 2
+                ;;
+            --notify=*)
+                notify_methods="${1#*=}"
+                shift
                 ;;
             --daemon|-d)
                 daemon_mode=true
@@ -1188,6 +1211,7 @@ OPTIONS:
     --daemon, -d           Run in background (daemon mode)
     --dry-run, -n          Check but don't trigger fallbacks
     --once, -1             Single check and exit
+    --notify <method>      Notification: slack|discord|desktop|terminal|none
     --json                 JSON output (global flag)
 
 BEHAVIOR:
@@ -1227,6 +1251,17 @@ EOF
     if ! [[ "$interval" =~ ^[0-9]+$ ]] || [[ "$interval" -lt 10 ]]; then
         log_error "Invalid interval: $interval (must be >= 10 seconds)"
         return 4
+    fi
+
+    # Configure notifications for watch loop
+    if [[ "$notify_methods" != "none" ]]; then
+        # shellcheck disable=SC2034  # Used by notify.sh
+        DSR_NOTIFY_METHODS="$notify_methods"
+        DSR_NOTIFY_ENABLED=true
+        notify_init >/dev/null 2>&1 || true
+        log_info "Notifications enabled: $notify_methods"
+    else
+        DSR_NOTIFY_ENABLED=false
     fi
 
     # Run preflight check

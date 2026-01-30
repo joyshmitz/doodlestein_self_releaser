@@ -468,7 +468,7 @@ gh_upload_asset() {
 
     if gh_check 2>/dev/null; then
         gh release upload --clobber -R "$(echo "$upload_url" | sed 's|.*/repos/||; s|/releases/.*||')" \
-            "$(echo "$upload_url" | grep -oP 'tag/[^/]+' | cut -d/ -f2)" \
+            "$(echo "$upload_url" | sed -n 's|.*tag/\([^/]*\).*|\1|p')" \
             "$file_path" 2>/dev/null
     else
         gh_check_token || return 3
