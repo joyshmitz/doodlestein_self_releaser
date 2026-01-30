@@ -697,6 +697,292 @@ build_state_cleanup() {
   done
 }
 
+# ============================================================================
+# Retry and Recovery Logic
+# ============================================================================
+
+# Retry configuration
+BUILD_RETRY_MAX="${DSR_RETRY_MAX:-3}"
+BUILD_RETRY_BASE_DELAY="${DSR_RETRY_DELAY:-5}"  # Base delay in seconds
+BUILD_RETRY_MAX_DELAY="${DSR_RETRY_MAX_DELAY:-300}"  # Max delay (5 min)
+
+# Calculate exponential backoff with jitter
+# Args: attempt_number
+# Returns: delay in seconds
+_build_calc_backoff() {
+  local attempt="$1"
+
+  # Exponential backoff: base * 2^attempt
+  local delay=$((BUILD_RETRY_BASE_DELAY * (1 << attempt)))
+
+  # Cap at max delay
+  if [[ $delay -gt $BUILD_RETRY_MAX_DELAY ]]; then
+    delay=$BUILD_RETRY_MAX_DELAY
+  fi
+
+  # Add jitter (0-25% of delay) to avoid thundering herd
+  local jitter=$((RANDOM % (delay / 4 + 1)))
+  delay=$((delay + jitter))
+
+  echo "$delay"
+}
+
+# Execute a command with exponential backoff retry
+# Args: max_retries command [args...]
+# Returns: Exit code of last attempt
+build_retry_with_backoff() {
+  local max_retries="${1:-$BUILD_RETRY_MAX}"
+  shift
+
+  local attempt=0
+  local exit_code=0
+
+  while [[ $attempt -lt $max_retries ]]; do
+    if "$@"; then
+      return 0
+    fi
+    exit_code=$?
+
+    attempt=$((attempt + 1))
+    if [[ $attempt -ge $max_retries ]]; then
+      log_error "Command failed after $max_retries attempts: $*"
+      return $exit_code
+    fi
+
+    local delay
+    delay=$(_build_calc_backoff "$attempt")
+    log_warn "Attempt $attempt failed (exit $exit_code), retrying in ${delay}s..."
+    sleep "$delay"
+  done
+
+  return $exit_code
+}
+
+# Record a retry attempt for a host in build state
+# Args: tool version host attempt error_message [run_id]
+build_state_record_retry() {
+  local tool="$1"
+  local version="$2"
+  local host="$3"
+  local attempt="$4"
+  local error_msg="$5"
+  local run_id="${6:-latest}"
+
+  local tool_dir
+  tool_dir=$(_build_get_tool_dir "$tool" "$version")
+
+  if [[ "$run_id" == "latest" ]]; then
+    run_id=$(readlink "$tool_dir/latest" 2>/dev/null || true)
+    [[ -z "$run_id" ]] && return 1
+  fi
+
+  local state_file="$tool_dir/$run_id/state.json"
+  [[ ! -f "$state_file" ]] && return 1
+
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Update host with retry info
+  local tmp_file="$state_file.tmp"
+  jq --arg host "$host" --argjson attempt "$attempt" \
+    --arg error "$error_msg" --arg now "$now" \
+    '.hosts[$host].retry_count = $attempt |
+     .hosts[$host].last_error = $error |
+     .hosts[$host].last_retry_at = $now |
+     .hosts[$host].retries = ((.hosts[$host].retries // []) + [{attempt: $attempt, error: $error, at: $now}]) |
+     .updated_at = $now' \
+    "$state_file" > "$tmp_file" \
+    && mv "$tmp_file" "$state_file"
+
+  log_debug "Recorded retry $attempt for $host: $error_msg"
+}
+
+# Get retry count for a host
+# Args: tool version host [run_id]
+# Returns: retry count (0 if none)
+build_state_get_retry_count() {
+  local tool="$1"
+  local version="$2"
+  local host="$3"
+  local run_id="${4:-latest}"
+
+  local state
+  state=$(build_state_get "$tool" "$version" "$run_id" 2>/dev/null) || return 1
+
+  local count
+  count=$(echo "$state" | jq -r --arg host "$host" '.hosts[$host].retry_count // 0')
+  echo "$count"
+}
+
+# Reset retry count for a host (on success)
+# Args: tool version host [run_id]
+build_state_reset_retries() {
+  local tool="$1"
+  local version="$2"
+  local host="$3"
+  local run_id="${4:-latest}"
+
+  local tool_dir
+  tool_dir=$(_build_get_tool_dir "$tool" "$version")
+
+  if [[ "$run_id" == "latest" ]]; then
+    run_id=$(readlink "$tool_dir/latest" 2>/dev/null || true)
+    [[ -z "$run_id" ]] && return 1
+  fi
+
+  local state_file="$tool_dir/$run_id/state.json"
+  [[ ! -f "$state_file" ]] && return 1
+
+  local tmp_file="$state_file.tmp"
+  jq --arg host "$host" \
+    '.hosts[$host].retry_count = 0 | .hosts[$host].last_error = null' \
+    "$state_file" > "$tmp_file" \
+    && mv "$tmp_file" "$state_file"
+}
+
+# Check if host has exceeded retry limit
+# Args: tool version host [run_id]
+# Returns: 0 if can retry, 1 if exceeded
+build_state_can_retry() {
+  local tool="$1"
+  local version="$2"
+  local host="$3"
+  local run_id="${4:-latest}"
+
+  local count
+  count=$(build_state_get_retry_count "$tool" "$version" "$host" "$run_id")
+
+  if [[ $count -ge $BUILD_RETRY_MAX ]]; then
+    return 1  # Exceeded
+  fi
+  return 0  # Can retry
+}
+
+# Resume a failed or interrupted build
+# Args: tool version [run_id]
+# Returns: JSON with resume plan
+build_state_resume() {
+  local tool="$1"
+  local version="$2"
+  local run_id="${3:-latest}"
+
+  local state
+  state=$(build_state_get "$tool" "$version" "$run_id" 2>/dev/null) || {
+    echo '{"error": "Build state not found", "can_resume": false}'
+    return 1
+  }
+
+  local status
+  status=$(echo "$state" | jq -r '.status')
+
+  if [[ "$status" == "completed" ]]; then
+    echo '{"error": "Build already completed", "can_resume": false}'
+    return 1
+  fi
+
+  if [[ "$status" == "cancelled" ]]; then
+    echo '{"error": "Build was cancelled", "can_resume": false}'
+    return 1
+  fi
+
+  # Get completed and failed hosts
+  local completed_hosts failed_hosts pending_hosts
+  completed_hosts=$(build_state_completed_hosts "$tool" "$version" "$run_id" | jq -R -s 'split("\n") | map(select(. != ""))')
+  failed_hosts=$(build_state_failed_hosts "$tool" "$version" "$run_id" | jq -R -s 'split("\n") | map(select(. != ""))')
+  pending_hosts=$(build_state_pending_hosts "$tool" "$version" "$run_id" | jq -R -s 'split("\n") | map(select(. != ""))')
+
+  # Check which failed hosts can be retried
+  local retryable_hosts=()
+  local exceeded_hosts=()
+  while IFS= read -r host; do
+    [[ -z "$host" ]] && continue
+    if build_state_can_retry "$tool" "$version" "$host" "$run_id"; then
+      retryable_hosts+=("$host")
+    else
+      exceeded_hosts+=("$host")
+    fi
+  done < <(build_state_failed_hosts "$tool" "$version" "$run_id")
+
+  local actual_run_id
+  actual_run_id=$(echo "$state" | jq -r '.run_id')
+
+  # Build resume plan
+  jq -nc \
+    --arg tool "$tool" \
+    --arg version "$version" \
+    --arg run_id "$actual_run_id" \
+    --arg status "$status" \
+    --argjson completed "$completed_hosts" \
+    --argjson failed "$failed_hosts" \
+    --argjson pending "$pending_hosts" \
+    --argjson retryable "$(printf '%s\n' "${retryable_hosts[@]:-}" | jq -R -s 'split("\n") | map(select(. != ""))')" \
+    --argjson exceeded "$(printf '%s\n' "${exceeded_hosts[@]:-}" | jq -R -s 'split("\n") | map(select(. != ""))')" \
+    '{
+      can_resume: true,
+      tool: $tool,
+      version: $version,
+      run_id: $run_id,
+      current_status: $status,
+      completed_hosts: $completed,
+      failed_hosts: $failed,
+      pending_hosts: $pending,
+      retryable_hosts: $retryable,
+      exceeded_retry_limit: $exceeded,
+      hosts_to_process: (($pending + $retryable) | unique)
+    }'
+}
+
+# Execute a build step for a host with automatic retry
+# Args: tool version host command [args...]
+# Returns: 0 on success, 1 on permanent failure
+build_state_exec_with_retry() {
+  local tool="$1"
+  local version="$2"
+  local host="$3"
+  shift 3
+
+  # Check if we can still retry
+  if ! build_state_can_retry "$tool" "$version" "$host"; then
+    log_error "Host $host has exceeded retry limit"
+    return 1
+  fi
+
+  local attempt=0
+  local max_attempts=$BUILD_RETRY_MAX
+  local exit_code=0
+
+  while [[ $attempt -lt $max_attempts ]]; do
+    # Mark host as running
+    build_state_update_host "$tool" "$version" "$host" "running" '{}' >/dev/null 2>&1
+
+    if "$@"; then
+      # Success - reset retries and mark completed
+      build_state_reset_retries "$tool" "$version" "$host" >/dev/null 2>&1
+      build_state_update_host "$tool" "$version" "$host" "completed" '{}' >/dev/null 2>&1
+      return 0
+    fi
+    exit_code=$?
+
+    attempt=$((attempt + 1))
+
+    # Record the retry
+    build_state_record_retry "$tool" "$version" "$host" "$attempt" "exit code $exit_code"
+
+    if [[ $attempt -ge $max_attempts ]]; then
+      log_error "Host $host failed after $max_attempts attempts"
+      build_state_update_host "$tool" "$version" "$host" "failed" "{\"exit_code\": $exit_code}" >/dev/null 2>&1
+      return 1
+    fi
+
+    local delay
+    delay=$(_build_calc_backoff "$attempt")
+    log_warn "Host $host attempt $attempt failed, retrying in ${delay}s..."
+    sleep "$delay"
+  done
+
+  return 1
+}
+
 # Export functions
 export -f build_state_init build_lock_acquire build_lock_release build_lock_check build_lock_info
 export -f build_state_create build_state_get build_state_update_status build_state_update_host
@@ -706,3 +992,6 @@ export -f build_state_completed_hosts build_state_failed_hosts build_state_pendi
 export -f build_state_workspace build_state_artifacts_dir build_state_logs_dir
 export -f build_state_workspace_logs_dir
 export -f build_state_list build_state_cleanup
+export -f build_retry_with_backoff build_state_record_retry build_state_get_retry_count
+export -f build_state_reset_retries build_state_can_retry build_state_resume
+export -f build_state_exec_with_retry

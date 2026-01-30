@@ -303,6 +303,189 @@ test_build_state_list() {
   fi
 }
 
+# ============================================================================
+# Retry and Recovery Tests
+# ============================================================================
+
+test_build_retry_backoff_calculation() {
+  ((TESTS_RUN++))
+
+  local delay0 delay1 delay2
+  delay0=$(_build_calc_backoff 0)
+  delay1=$(_build_calc_backoff 1)
+  delay2=$(_build_calc_backoff 2)
+
+  # Exponential: base * 2^attempt (default base=5)
+  # delay0 ~= 5, delay1 ~= 10, delay2 ~= 20 (plus jitter)
+  if [[ "$delay1" -ge "$delay0" && "$delay2" -ge "$delay1" ]]; then
+    pass "_build_calc_backoff increases exponentially"
+  else
+    fail "_build_calc_backoff: delays should increase (got $delay0, $delay1, $delay2)"
+  fi
+}
+
+test_build_retry_with_backoff_success() {
+  ((TESTS_RUN++))
+
+  local attempt_count=0
+  test_cmd() { ((attempt_count++)); return 0; }
+  export -f test_cmd
+
+  if build_retry_with_backoff 3 test_cmd; then
+    if [[ "$attempt_count" -eq 1 ]]; then
+      pass "build_retry_with_backoff succeeds on first try"
+    else
+      fail "build_retry_with_backoff: expected 1 attempt, got $attempt_count"
+    fi
+  else
+    fail "build_retry_with_backoff should succeed"
+  fi
+}
+
+test_build_retry_with_backoff_failure() {
+  ((TESTS_RUN++))
+
+  # Override retry settings for faster test
+  BUILD_RETRY_BASE_DELAY=0
+
+  if ! build_retry_with_backoff 2 false 2>/dev/null; then
+    pass "build_retry_with_backoff fails after max attempts"
+  else
+    fail "build_retry_with_backoff should fail"
+  fi
+
+  BUILD_RETRY_BASE_DELAY=5
+}
+
+test_build_state_record_retry() {
+  ((TESTS_RUN++))
+  build_state_init
+
+  build_state_create "retry-tool1" "v1.0.0" "trj" >/dev/null
+  build_state_update_host "retry-tool1" "v1.0.0" "trj" "running"
+  build_state_record_retry "retry-tool1" "v1.0.0" "trj" 1 "connection timeout"
+
+  local state
+  state=$(build_state_get "retry-tool1" "v1.0.0")
+
+  if echo "$state" | jq -e '.hosts.trj.retry_count == 1' >/dev/null 2>&1; then
+    if echo "$state" | jq -e '.hosts.trj.last_error == "connection timeout"' >/dev/null 2>&1; then
+      pass "build_state_record_retry records attempt and error"
+    else
+      fail "build_state_record_retry should record error message"
+    fi
+  else
+    fail "build_state_record_retry should increment retry_count"
+  fi
+}
+
+test_build_state_get_retry_count() {
+  ((TESTS_RUN++))
+  build_state_init
+
+  build_state_create "retry-tool2" "v1.0.0" "trj" >/dev/null
+  build_state_update_host "retry-tool2" "v1.0.0" "trj" "running"
+
+  local count
+  count=$(build_state_get_retry_count "retry-tool2" "v1.0.0" "trj")
+
+  if [[ "$count" -eq 0 ]]; then
+    # Now add a retry
+    build_state_record_retry "retry-tool2" "v1.0.0" "trj" 1 "error"
+    count=$(build_state_get_retry_count "retry-tool2" "v1.0.0" "trj")
+    if [[ "$count" -eq 1 ]]; then
+      pass "build_state_get_retry_count returns correct count"
+    else
+      fail "build_state_get_retry_count should return 1, got: $count"
+    fi
+  else
+    fail "build_state_get_retry_count should return 0 initially"
+  fi
+}
+
+test_build_state_can_retry() {
+  ((TESTS_RUN++))
+  build_state_init
+
+  # Override max retries for test
+  BUILD_RETRY_MAX=2
+
+  build_state_create "retry-tool3" "v1.0.0" "trj" >/dev/null
+  build_state_update_host "retry-tool3" "v1.0.0" "trj" "running"
+
+  # Should be able to retry initially
+  if build_state_can_retry "retry-tool3" "v1.0.0" "trj"; then
+    # Add retries up to limit
+    build_state_record_retry "retry-tool3" "v1.0.0" "trj" 1 "error"
+    build_state_record_retry "retry-tool3" "v1.0.0" "trj" 2 "error"
+
+    # Should not be able to retry now
+    if ! build_state_can_retry "retry-tool3" "v1.0.0" "trj"; then
+      pass "build_state_can_retry respects retry limit"
+    else
+      fail "build_state_can_retry should return false after max retries"
+    fi
+  else
+    fail "build_state_can_retry should return true initially"
+  fi
+
+  BUILD_RETRY_MAX=3
+}
+
+test_build_state_resume() {
+  ((TESTS_RUN++))
+  build_state_init
+
+  build_state_create "resume-tool" "v1.0.0" "trj,mmini,wlap" >/dev/null
+  build_state_update_status "resume-tool" "v1.0.0" "running"
+  build_state_update_host "resume-tool" "v1.0.0" "trj" "completed"
+  build_state_update_host "resume-tool" "v1.0.0" "mmini" "failed"
+  # wlap is still pending
+
+  local resume_plan
+  resume_plan=$(build_state_resume "resume-tool" "v1.0.0")
+
+  if echo "$resume_plan" | jq -e '.can_resume == true' >/dev/null 2>&1; then
+    local hosts_to_process
+    hosts_to_process=$(echo "$resume_plan" | jq -r '.hosts_to_process | length')
+    # Should process wlap (pending) and mmini (failed, retryable)
+    if [[ "$hosts_to_process" -ge 1 ]]; then
+      pass "build_state_resume generates valid resume plan"
+    else
+      fail "build_state_resume should identify hosts to process"
+    fi
+  else
+    fail "build_state_resume should return can_resume=true"
+  fi
+}
+
+test_build_state_exec_with_retry() {
+  ((TESTS_RUN++))
+  build_state_init
+
+  # Override settings for faster test
+  BUILD_RETRY_MAX=2
+  BUILD_RETRY_BASE_DELAY=0
+
+  build_state_create "exec-tool" "v1.0.0" "trj" >/dev/null
+
+  # Test with command that succeeds
+  if build_state_exec_with_retry "exec-tool" "v1.0.0" "trj" true 2>/dev/null; then
+    local state
+    state=$(build_state_get "exec-tool" "v1.0.0")
+    if echo "$state" | jq -e '.hosts.trj.status == "completed"' >/dev/null 2>&1; then
+      pass "build_state_exec_with_retry marks host completed on success"
+    else
+      fail "build_state_exec_with_retry should mark host as completed"
+    fi
+  else
+    fail "build_state_exec_with_retry should succeed with true command"
+  fi
+
+  BUILD_RETRY_MAX=3
+  BUILD_RETRY_BASE_DELAY=5
+}
+
 # Cleanup
 cleanup() {
   rm -rf "$TEMP_DIR"
@@ -338,6 +521,16 @@ test_build_state_completed_hosts
 test_build_state_workspace
 test_build_state_artifacts_dir
 test_build_state_list
+
+# Retry tests
+test_build_retry_backoff_calculation
+test_build_retry_with_backoff_success
+test_build_retry_with_backoff_failure
+test_build_state_record_retry
+test_build_state_get_retry_count
+test_build_state_can_retry
+test_build_state_resume
+test_build_state_exec_with_retry
 
 echo ""
 echo "=========================================="

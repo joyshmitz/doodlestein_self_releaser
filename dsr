@@ -1742,10 +1742,449 @@ EOF
     return $exit_code
 }
 
+# ============================================================================
+# RELEASE SUBCOMMAND
+# ============================================================================
+
 cmd_release() {
-    log_warn "release command not yet implemented"
-    log_info "See bead bd-1jt.3.1 for implementation plan"
-    return 4
+    local tool_name=""
+    local version=""
+    local artifacts_dir=""
+    local draft=false
+    local prerelease=false
+    local generate_notes=false
+    local verify_tag=false
+    local resume=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tool|-t)
+                tool_name="$2"
+                shift 2
+                ;;
+            --version|-V)
+                version="$2"
+                shift 2
+                ;;
+            --artifacts|--artifacts-dir|-a)
+                artifacts_dir="$2"
+                shift 2
+                ;;
+            --draft)
+                draft=true
+                shift
+                ;;
+            --prerelease)
+                prerelease=true
+                shift
+                ;;
+            --generate-notes)
+                generate_notes=true
+                shift
+                ;;
+            --verify-tag)
+                verify_tag=true
+                shift
+                ;;
+            --resume|-r)
+                resume=true
+                shift
+                ;;
+            --help|-h)
+                cat << 'EOF'
+dsr release - Upload artifacts to GitHub
+
+USAGE:
+    dsr release <tool> <version>
+    dsr release <tool> <version> --artifacts <dir>
+    dsr release <tool> <version> --draft
+    dsr release <tool> <version> --generate-notes
+
+OPTIONS:
+    -t, --tool <name>        Tool to release (or first positional arg)
+    -V, --version <ver>      Version to release (or second positional arg)
+    -a, --artifacts <dir>    Directory containing build artifacts
+    --draft                  Create as draft release
+    --prerelease             Mark as prerelease
+    --generate-notes         Auto-generate release notes
+    --verify-tag             Verify tag exists before release
+    -r, --resume             Resume interrupted upload
+
+DESCRIPTION:
+    Creates a GitHub Release and uploads all build artifacts including
+    binaries, checksums, and signatures. Uses manifest from build phase
+    to verify completeness.
+
+REQUIRED INPUTS:
+    - Build manifest (source of truth from dsr build)
+    - Checksums + signatures (from signing module)
+    - Existing git tag for the version
+
+EXAMPLES:
+    dsr release ntm 1.2.3                   Create release v1.2.3
+    dsr release ntm 1.2.3 --draft           Create as draft
+    dsr release ntm 1.2.3 --resume          Resume interrupted upload
+    dsr release --tool bv --version 2.0.0   Full flag syntax
+
+EXIT CODES:
+    0  - Release created successfully
+    1  - Some assets failed to upload
+    3  - Authentication error
+    4  - Invalid arguments
+    7  - Release creation failed
+EOF
+                return 0
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                log_info "Run 'dsr release --help' for usage"
+                return 4
+                ;;
+            *)
+                # Positional arguments: tool, version
+                if [[ -z "$tool_name" ]]; then
+                    tool_name="$1"
+                elif [[ -z "$version" ]]; then
+                    version="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Validate required arguments
+    if [[ -z "$tool_name" ]]; then
+        log_error "Tool name required"
+        log_info "Run 'dsr release --help' for usage"
+        return 4
+    fi
+
+    if [[ -z "$version" ]]; then
+        log_error "Version required"
+        log_info "Run 'dsr release --help' for usage"
+        return 4
+    fi
+
+    # Check GitHub authentication
+    if ! gh_check 2>/dev/null; then
+        if ! gh_check_token 2>/dev/null; then
+            log_error "GitHub authentication required"
+            log_info "Run: gh auth login"
+            if $JSON_MODE; then
+                json_envelope "release" "error" 3 '{"error": "GitHub authentication required"}'
+            fi
+            return 3
+        fi
+    fi
+
+    # Load tool configuration
+    if ! act_load_repo_config "$tool_name" 2>/dev/null; then
+        log_error "Tool '$tool_name' not found in repos.d"
+        log_info "Available tools: $(act_list_tools 2>/dev/null | tr '\n' ' ')"
+        return 4
+    fi
+
+    # Get repository info
+    local repo local_path
+    repo=$(act_get_repo "$tool_name")
+    local_path=$(act_get_local_path "$tool_name")
+
+    if [[ -z "$repo" ]]; then
+        log_error "No GitHub repo configured for $tool_name"
+        return 4
+    fi
+
+    # Resolve owner/repo if short name
+    if [[ ! "$repo" =~ / ]]; then
+        repo="Dicklesworthstone/$repo"
+    fi
+
+    # Normalize version tag
+    local tag
+    tag=$(git_ops_version_to_tag "$version")
+
+    log_info "Releasing $tool_name $version to $repo"
+    log_set_tool "$tool_name"
+
+    # Verify tag exists (if requested or local_path available)
+    if $verify_tag || [[ -n "$local_path" && -d "$local_path" ]]; then
+        if [[ -n "$local_path" && -d "$local_path" ]]; then
+            if ! git_ops_tag_exists "$local_path" "$tag"; then
+                log_error "Tag $tag does not exist in $local_path"
+                log_info "Create with: dsr version tag $tool_name"
+                return 4
+            fi
+            log_info "Tag $tag verified locally"
+        fi
+    fi
+
+    # Determine artifacts directory
+    local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
+    if [[ -z "$artifacts_dir" ]]; then
+        artifacts_dir="$state_dir/artifacts/$tool_name/$version"
+    fi
+
+    if [[ ! -d "$artifacts_dir" ]]; then
+        log_error "Artifacts directory not found: $artifacts_dir"
+        log_info "Run 'dsr build $tool_name --version $version' first"
+        return 4
+    fi
+
+    # Find manifest
+    local manifest_file="$artifacts_dir/${tool_name}-${version}-manifest.json"
+    if [[ ! -f "$manifest_file" ]]; then
+        # Try alternate location
+        manifest_file="$state_dir/artifacts/${tool_name}-${version}-manifest.json"
+    fi
+
+    local manifest_exists=false
+    if [[ -f "$manifest_file" ]]; then
+        manifest_exists=true
+        log_info "Using manifest: $manifest_file"
+    else
+        log_warn "No manifest found, will upload all files in artifacts directory"
+    fi
+
+    # Record start time
+    local start_time
+    start_time=$(date +%s)
+
+    # Create or get release
+    local release_json release_id upload_url release_url
+    log_info "Creating GitHub release for $tag..."
+
+    local release_args=""
+    $draft && release_args+=" --draft"
+    $prerelease && release_args+=" --prerelease"
+
+    # Build release body
+    local release_body="Release $version"
+    if $generate_notes && [[ -n "$local_path" && -d "$local_path" ]]; then
+        # Try to get previous tag for comparison
+        local prev_tag
+        prev_tag=$(git -C "$local_path" describe --tags --abbrev=0 "$tag^" 2>/dev/null || echo "")
+        if [[ -n "$prev_tag" ]]; then
+            local commit_log
+            commit_log=$(git -C "$local_path" log --oneline "$prev_tag..$tag" 2>/dev/null | head -20)
+            if [[ -n "$commit_log" ]]; then
+                release_body="## Changes since $prev_tag"$'\n\n'"$commit_log"
+            fi
+        fi
+    fi
+
+    # shellcheck disable=SC2086
+    release_json=$(gh_create_release "$repo" "$tag" --name "$tag" --body "$release_body" $release_args 2>&1)
+    local create_status=$?
+
+    if [[ $create_status -ne 0 ]]; then
+        # Check if release already exists
+        release_json=$(gh api "repos/$repo/releases/tags/$tag" 2>/dev/null)
+        if [[ -n "$release_json" ]] && echo "$release_json" | jq -e '.id' &>/dev/null; then
+            log_info "Release $tag already exists, using existing release"
+        else
+            log_error "Failed to create release: $release_json"
+            if $JSON_MODE; then
+                json_envelope "release" "error" 7 "$(jq -nc --arg error "$release_json" '{error: $error}')"
+            fi
+            return 7
+        fi
+    fi
+
+    release_id=$(echo "$release_json" | jq -r '.id')
+    upload_url=$(echo "$release_json" | jq -r '.upload_url')
+    release_url=$(echo "$release_json" | jq -r '.html_url')
+
+    log_ok "Release created: $release_url"
+
+    # Collect files to upload
+    local files_to_upload=()
+    local uploaded_assets=()
+    local failed_assets=()
+    local skipped_assets=()
+
+    # Find all files in artifacts directory
+    while IFS= read -r file; do
+        [[ -f "$file" ]] && files_to_upload+=("$file")
+    done < <(find "$artifacts_dir" -maxdepth 1 -type f 2>/dev/null)
+
+    # Also look for checksum and signature files
+    local checksum_file="$artifacts_dir/SHA256SUMS.txt"
+    local sig_file="$artifacts_dir/SHA256SUMS.txt.minisig"
+
+    local checksum_pattern=" $checksum_file "
+    local sig_pattern=" $sig_file "
+    [[ -f "$checksum_file" && ! " ${files_to_upload[*]} " =~ $checksum_pattern ]] && files_to_upload+=("$checksum_file")
+    [[ -f "$sig_file" && ! " ${files_to_upload[*]} " =~ $sig_pattern ]] && files_to_upload+=("$sig_file")
+
+    local total_files=${#files_to_upload[@]}
+    log_info "Uploading $total_files file(s)..."
+
+    # Upload state for resume
+    local upload_state_file="$state_dir/releases/${tool_name}-${version}-upload.json"
+    mkdir -p "$(dirname "$upload_state_file")"
+
+    local already_uploaded=()
+    if $resume && [[ -f "$upload_state_file" ]]; then
+        while IFS= read -r name; do
+            [[ -n "$name" ]] && already_uploaded+=("$name")
+        done < <(jq -r '.uploaded[]?.name // empty' "$upload_state_file" 2>/dev/null)
+        log_info "Resuming: ${#already_uploaded[@]} file(s) already uploaded"
+    fi
+
+    # Upload each file
+    local idx=0
+    for file in "${files_to_upload[@]}"; do
+        idx=$((idx + 1))
+        local filename
+        filename=$(basename "$file")
+
+        # Skip if already uploaded (resume mode)
+        local filename_pattern=" $filename "
+        if [[ " ${already_uploaded[*]} " =~ $filename_pattern ]]; then
+            log_info "[$idx/$total_files] Skipping (already uploaded): $filename"
+            skipped_assets+=("$filename")
+            continue
+        fi
+
+        log_info "[$idx/$total_files] Uploading: $filename"
+
+        local size_bytes
+        size_bytes=$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo 0)
+
+        # Determine content type
+        local content_type="application/octet-stream"
+        case "$filename" in
+            *.tar.gz|*.tgz) content_type="application/gzip" ;;
+            *.zip) content_type="application/zip" ;;
+            *.json) content_type="application/json" ;;
+            *.txt) content_type="text/plain" ;;
+            *.minisig) content_type="text/plain" ;;
+        esac
+
+        # Upload
+        local upload_result
+        if upload_result=$(gh_upload_asset "$upload_url" "$file" "$content_type" 2>&1); then
+            log_ok "  Uploaded: $filename ($size_bytes bytes)"
+            uploaded_assets+=("$(jq -nc \
+                --arg name "$filename" \
+                --argjson size "$size_bytes" \
+                --arg content_type "$content_type" \
+                '{name: $name, size_bytes: $size, content_type: $content_type, status: "uploaded"}')")
+
+            # Update upload state for resume
+            jq -nc --argjson uploaded "$(printf '%s\n' "${uploaded_assets[@]}" | jq -sc '.')" \
+                '{uploaded: $uploaded}' > "$upload_state_file"
+        else
+            log_error "  Failed to upload: $filename"
+            log_error "  Error: $upload_result"
+            failed_assets+=("$(jq -nc \
+                --arg name "$filename" \
+                --arg error "$upload_result" \
+                '{name: $name, error: $error}')")
+        fi
+    done
+
+    # Calculate duration
+    local end_time duration
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+
+    # Verify uploaded assets match manifest (if manifest exists)
+    local verification_status="skipped"
+    local missing_assets=()
+    if $manifest_exists && [[ -f "$manifest_file" ]]; then
+        verification_status="ok"
+        while IFS= read -r expected_file; do
+            [[ -z "$expected_file" ]] && continue
+            local found=false
+            for asset in "${uploaded_assets[@]}"; do
+                local asset_name
+                asset_name=$(echo "$asset" | jq -r '.name')
+                if [[ "$asset_name" == "$expected_file" ]]; then
+                    found=true
+                    break
+                fi
+            done
+            if ! $found; then
+                missing_assets+=("$expected_file")
+                verification_status="incomplete"
+            fi
+        done < <(jq -r '.artifacts[]?.filename // empty' "$manifest_file" 2>/dev/null)
+    fi
+
+    # Build result
+    local success_count=${#uploaded_assets[@]}
+    local failed_count=${#failed_assets[@]}
+    local skipped_count=${#skipped_assets[@]}
+
+    local status="success"
+    local exit_code=0
+    if [[ $failed_count -gt 0 ]]; then
+        status="partial"
+        exit_code=1
+    fi
+
+    # Clean up upload state on success
+    if [[ $failed_count -eq 0 ]]; then
+        rm -f "$upload_state_file"
+    fi
+
+    # Output
+    if $JSON_MODE; then
+        local details
+        details=$(jq -nc \
+            --arg repo "$repo" \
+            --arg version "$version" \
+            --arg tag "$tag" \
+            --argjson release_id "$release_id" \
+            --arg release_url "$release_url" \
+            --arg upload_url "$upload_url" \
+            --argjson draft "$draft" \
+            --argjson prerelease "$prerelease" \
+            --argjson uploaded "$(printf '%s\n' "${uploaded_assets[@]}" | jq -sc '.')" \
+            --argjson failed "$(printf '%s\n' "${failed_assets[@]}" | jq -sc '.')" \
+            --arg verification "$verification_status" \
+            --argjson total "$total_files" \
+            --argjson success "$success_count" \
+            --argjson failed_count "$failed_count" \
+            --argjson skipped "$skipped_count" \
+            --argjson duration "$duration" \
+            '{
+                repo: $repo,
+                version: $version,
+                tag: $tag,
+                release_id: $release_id,
+                release_url: $release_url,
+                upload_url: $upload_url,
+                draft: $draft,
+                prerelease: $prerelease,
+                assets_uploaded: $uploaded,
+                assets_failed: $failed,
+                verification: $verification,
+                total: $total,
+                success: $success,
+                failed: $failed_count,
+                skipped: $skipped,
+                duration_seconds: $duration
+            }')
+        json_envelope "release" "$status" "$exit_code" "$details"
+    else
+        echo ""
+        if [[ $failed_count -eq 0 ]]; then
+            log_ok "Release $tag complete: $success_count asset(s) uploaded"
+        else
+            log_error "Release $tag incomplete: $success_count uploaded, $failed_count failed"
+        fi
+        log_info "Release URL: $release_url"
+        log_info "Duration: ${duration}s"
+
+        if [[ ${#missing_assets[@]} -gt 0 ]]; then
+            log_warn "Missing from manifest: ${missing_assets[*]}"
+        fi
+    fi
+
+    return $exit_code
 }
 
 cmd_fallback() {
