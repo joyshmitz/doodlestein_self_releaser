@@ -49,6 +49,7 @@ source "$SCRIPT_DIR/src/quality_gates.sh"
 source "$SCRIPT_DIR/src/build_state.sh"
 source "$SCRIPT_DIR/src/git_ops.sh"
 source "$SCRIPT_DIR/src/version.sh"
+source "$SCRIPT_DIR/src/act_runner.sh"
 
 # Global flags
 JSON_MODE=false
@@ -1357,9 +1358,285 @@ EOF
 }
 
 cmd_build() {
-    log_warn "build command not yet implemented"
-    log_info "See bead bd-1jt.2.1 for implementation plan"
-    return 4
+    local tool_name=""
+    local targets=()
+    local version=""
+    local output_dir=""
+    # shellcheck disable=SC2034  # parallel reserved for future parallel build support
+    local parallel=false
+    # shellcheck disable=SC2034  # resume reserved for future resume support
+    local resume=false
+    local allow_dirty=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tool|-t)
+                tool_name="$2"
+                shift 2
+                ;;
+            --target)
+                targets+=("$2")
+                shift 2
+                ;;
+            --targets)
+                # Allow comma-separated list
+                IFS=',' read -ra targets <<< "$2"
+                shift 2
+                ;;
+            --version|-V)
+                version="$2"
+                shift 2
+                ;;
+            --output-dir|-o)
+                output_dir="$2"
+                shift 2
+                ;;
+            --parallel|-p)
+                parallel=true  # shellcheck disable=SC2034
+                shift
+                ;;
+            --resume|-r)
+                resume=true  # shellcheck disable=SC2034
+                shift
+                ;;
+            --allow-dirty)
+                allow_dirty=true
+                shift
+                ;;
+            --help|-h)
+                cat << 'EOF'
+dsr build - Build artifacts locally
+
+USAGE:
+    dsr build <tool> [options]
+    dsr build --tool <name> [options]
+
+OPTIONS:
+    -t, --tool <name>      Tool to build (required, or as first positional arg)
+    --target <target>      Specific target (e.g., linux/amd64); can repeat
+    --targets <list>       Comma-separated target list
+    -V, --version <ver>    Version to build (default: detect from version files)
+    -o, --output-dir <dir> Output directory for artifacts
+    -p, --parallel         Build targets in parallel
+    -r, --resume           Resume interrupted build
+    --allow-dirty          Allow building with uncommitted changes
+
+DESCRIPTION:
+    Builds a tool for all configured targets using act (Linux) and
+    SSH to remote hosts (macOS/Windows).
+
+TARGETS:
+    Configured per tool in ~/.config/dsr/repos.d/<tool>.yaml
+    Common targets: linux/amd64, linux/arm64, darwin/arm64, windows/amd64
+
+EXAMPLES:
+    dsr build ntm                           Build ntm for all targets
+    dsr build ntm --target linux/amd64      Build only for Linux x64
+    dsr build ntm --version 1.2.3           Build specific version
+    dsr build ntm --parallel                Build all targets in parallel
+    dsr build --tool bv --resume            Resume interrupted bv build
+
+EXIT CODES:
+    0  - All builds succeeded
+    1  - Some builds failed
+    2  - Build already in progress (lock held)
+    4  - Invalid arguments or missing config
+    6  - Build failed
+EOF
+                return 0
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                log_info "Run 'dsr build --help' for usage"
+                return 4
+                ;;
+            *)
+                # First positional arg is tool name
+                if [[ -z "$tool_name" ]]; then
+                    tool_name="$1"
+                else
+                    # Additional positional args might be targets
+                    targets+=("$1")
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Validate tool name
+    if [[ -z "$tool_name" ]]; then
+        log_error "Tool name required"
+        log_info "Run 'dsr build --help' for usage"
+        return 4
+    fi
+
+    # Set output directory default
+    local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
+    [[ -z "$output_dir" ]] && output_dir="$state_dir/artifacts"
+    mkdir -p "$output_dir"
+
+    # Check if act is available
+    if ! act_check; then
+        log_error "act not available - cannot build"
+        return 3
+    fi
+
+    # Load tool config
+    if ! act_load_repo_config "$tool_name"; then
+        log_error "Tool '$tool_name' not found in repos.d"
+        log_info "Available tools: $(act_list_tools 2>/dev/null | tr '\n' ' ')"
+        return 4
+    fi
+
+    # Get local path
+    local local_path
+    local_path=$(act_get_local_path "$tool_name")
+    if [[ -z "$local_path" || ! -d "$local_path" ]]; then
+        log_error "Local path not found for $tool_name: $local_path"
+        return 4
+    fi
+
+    # Check for dirty working tree
+    if ! $allow_dirty; then
+        if git_ops_is_dirty "$local_path"; then
+            log_error "Working tree has uncommitted changes in $local_path"
+            log_info "Commit changes or use --allow-dirty to override"
+            return 1
+        fi
+    fi
+
+    # Detect version if not specified
+    if [[ -z "$version" ]]; then
+        log_info "Detecting version from version files..."
+        if version=$(version_detect "$local_path" 2>/dev/null); then
+            log_info "Detected version: $version"
+        else
+            log_error "Cannot detect version. Specify with --version"
+            return 4
+        fi
+    fi
+
+    # Normalize version (ensure it has 'v' prefix for tag)
+    local tag
+    tag=$(git_ops_version_to_tag "$version")
+
+    # Check if tag exists
+    if ! git_ops_tag_exists "$local_path" "$tag"; then
+        log_warn "Tag $tag does not exist in $local_path"
+        log_info "Creating tag with: dsr version tag $tool_name"
+        # For now, proceed anyway - the version might be in version files but not tagged
+    fi
+
+    log_info "Building $tool_name $version"
+    log_set_tool "$tool_name"
+
+    # Get targets from args or config
+    local target_list
+    if [[ ${#targets[@]} -gt 0 ]]; then
+        target_list="${targets[*]}"
+    else
+        target_list=$(act_get_targets "$tool_name")
+    fi
+
+    if [[ -z "$target_list" ]]; then
+        log_error "No targets configured for $tool_name"
+        return 4
+    fi
+
+    log_info "Targets: $target_list"
+
+    # Record start time
+    local start_time
+    start_time=$(date +%s)
+
+    # Run orchestrated build
+    local result
+    # shellcheck disable=SC2086
+    result=$(act_orchestrate_build "$tool_name" "$version" $target_list 2>&1)
+    local exit_code=$?
+
+    # Parse result
+    local end_time duration
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+
+    # Extract summary from result
+    local total success failed
+    total=$(echo "$result" | grep -o '"total":[0-9]*' | grep -o '[0-9]*' | tail -1)
+    success=$(echo "$result" | grep -o '"success":[0-9]*' | grep -o '[0-9]*' | tail -1)
+    failed=$(echo "$result" | grep -o '"failed":[0-9]*' | grep -o '[0-9]*' | tail -1)
+
+    # Default values if parsing failed
+    [[ -z "$total" ]] && total=0
+    [[ -z "$success" ]] && success=0
+    [[ -z "$failed" ]] && failed=0
+
+    # Generate manifest
+    local manifest_file="$output_dir/${tool_name}-${version}-manifest.json"
+    if [[ $success -gt 0 ]]; then
+        # Generate manifest from results
+        act_generate_manifest "$tool_name" "$version" "$output_dir" > "$manifest_file" 2>/dev/null || true
+    fi
+
+    # Output
+    if $JSON_MODE; then
+        local build_details
+        build_details=$(cat << EOF
+{
+  "tool": "$tool_name",
+  "version": "$version",
+  "targets": $(echo "$target_list" | tr ' ' '\n' | jq -R . | jq -s .),
+  "total": $total,
+  "success": $success,
+  "failed": $failed,
+  "duration_seconds": $duration,
+  "output_dir": "$output_dir",
+  "manifest": "$manifest_file"
+}
+EOF
+)
+        if [[ $failed -eq 0 && $success -gt 0 ]]; then
+            json_envelope "build" "success" 0 "$build_details"
+        elif [[ $success -gt 0 ]]; then
+            json_envelope "build" "partial" 1 "$build_details"
+        else
+            json_envelope "build" "failed" 6 "$build_details"
+        fi
+    else
+        echo ""
+        log_info "=== Build Summary ==="
+        log_info "Tool:     $tool_name"
+        log_info "Version:  $version"
+        log_info "Duration: ${duration}s"
+        echo ""
+        log_info "Results:"
+        log_info "  Total:    $total"
+        if [[ $success -gt 0 ]]; then
+            log_ok "  Success:  $success"
+        else
+            log_info "  Success:  $success"
+        fi
+        if [[ $failed -gt 0 ]]; then
+            log_error "  Failed:   $failed"
+        else
+            log_info "  Failed:   $failed"
+        fi
+        echo ""
+        if [[ -f "$manifest_file" ]]; then
+            log_ok "Manifest: $manifest_file"
+        fi
+        log_info "Artifacts: $output_dir"
+    fi
+
+    # Return appropriate exit code
+    if [[ $failed -eq 0 && $success -gt 0 ]]; then
+        return 0
+    elif [[ $success -gt 0 ]]; then
+        return 1  # Partial success
+    else
+        return 6  # All failed
+    fi
 }
 
 # Quality gates command - run pre-release checks
