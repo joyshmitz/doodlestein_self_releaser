@@ -35,12 +35,12 @@ hosts:
   alpha:
     platform: linux/amd64
     connection: local
-    max_parallel: 3
+    concurrency: 3
     description: "Local host"
   beta:
     platform: darwin/arm64
     connection: ssh
-    max_parallel: 1
+    concurrency: 1
     description: "Remote host"
 YAML
 
@@ -60,8 +60,8 @@ else
 fi
 
 case "$query" in
-  ".hosts.alpha.max_parallel // 2") echo "3" ;;
-  ".hosts.beta.max_parallel // 2") echo "1" ;;
+  ".hosts.alpha.concurrency // 2") echo "3" ;;
+  ".hosts.beta.concurrency // 2") echo "1" ;;
   ".hosts.alpha.platform // \"\"") echo "linux/amd64" ;;
   ".hosts.beta.platform // \"\"") echo "darwin/arm64" ;;
   ".hosts.alpha.connection // \"ssh\"") echo "local" ;;
@@ -174,6 +174,8 @@ test_acquire_and_release_slot() {
   ((TESTS_RUN++))
 
   selector_init
+  # Clean up any locks from previous tests
+  rm -rf "$DSR_STATE_DIR/selector/locks"/* 2>/dev/null || true
   local run_id="test-run-1"
 
   if selector_acquire_slot "alpha" "$run_id"; then
@@ -236,10 +238,14 @@ test_choose_host_respects_prefer() {
 test_queue_status_returns_hosts() {
   ((TESTS_RUN++))
 
+  # Clean up locks for clean test state
+  rm -rf "$DSR_STATE_DIR/selector/locks"/* 2>/dev/null || true
+
   local status
   status=$(selector_queue_status --json)
 
-  if echo "$status" | jq -e 'length == 2 and map(.hostname) | sort == ["alpha","beta"]' >/dev/null; then
+  # Fixed jq precedence: wrap comparisons in parentheses
+  if echo "$status" | jq -e '(length == 2) and (map(.hostname) | sort == ["alpha","beta"])' >/dev/null; then
     pass "selector_queue_status returns all configured hosts"
   else
     fail "selector_queue_status missing hosts: $status"
