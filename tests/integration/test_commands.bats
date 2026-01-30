@@ -124,12 +124,6 @@ fi
 '
 }
 
-# Helper to extract JSON from multi-line output
-_extract_json() {
-    # Remove any non-JSON prefix lines and parse the JSON object
-    sed -n '/^{/,/^}/p' | jq -s 'last'
-}
-
 # ============================================================================
 # DRY CHECK TESTS
 # ============================================================================
