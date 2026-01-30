@@ -46,7 +46,7 @@ _hh_parse_host_fallback() {
     local in_capabilities=false
     local platform="" connection="" ssh_host="" description="" concurrency="1"
     local capabilities=""
-    local line indent
+    local line
 
     while IFS= read -r line || [[ -n "$line" ]]; do
         # Track section entry
@@ -739,7 +739,7 @@ host_health_check_all() {
     config_load 2>/dev/null || true
 
     local hosts
-    hosts=$(config_list_hosts 2>/dev/null | tr '\n' ' ')
+    hosts=$(_hh_list_hosts 2>/dev/null | tr '\n' ' ')
 
     if [[ -z "$hosts" ]]; then
         if $json_mode; then
