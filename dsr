@@ -38,6 +38,7 @@ source "$SCRIPT_DIR/src/logging.sh"
 source "$SCRIPT_DIR/src/config.sh"
 source "$SCRIPT_DIR/src/signing.sh"
 source "$SCRIPT_DIR/src/github.sh"
+source "$SCRIPT_DIR/src/host_health.sh"
 
 # Global flags
 JSON_MODE=false
@@ -68,6 +69,7 @@ COMMANDS:
     release     Upload artifacts to GitHub
     fallback    Full pipeline: check -> build -> release
     repos       Manage repository registry
+    health      Check health of build hosts
     config      View/modify configuration
     doctor      System diagnostics
     signing     Manage minisign keys and signing
@@ -292,62 +294,197 @@ cmd_config_edit() {
 }
 
 # ============================================================================
-# DOCTOR SUBCOMMAND (stub)
+# DOCTOR SUBCOMMAND
 # ============================================================================
 
 cmd_doctor() {
+    local quick_mode=false
+    local fix_mode=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quick|-q)
+                quick_mode=true
+                shift
+                ;;
+            --fix|-f)
+                fix_mode=true
+                shift
+                ;;
+            --help|-h)
+                cat << 'EOF'
+dsr doctor - System diagnostics
+
+USAGE:
+    dsr doctor [options]
+
+OPTIONS:
+    --quick, -q     Quick check (core deps + auth only)
+    --fix, -f       Suggest fixes for issues found
+    --json          JSON output (global flag)
+
+CHECKS:
+    Core (always run):
+      - git, gh (auth status), jq, curl
+
+    Build tools:
+      - docker, act, ssh to build hosts
+
+    Signing tools (if enabled):
+      - minisign, syft
+
+    Network:
+      - api.github.com, github.com connectivity
+
+    Config:
+      - Configuration file validation
+
+EXIT CODES:
+    0  - All checks passed (or only warnings)
+    3  - Critical errors found (missing core deps)
+
+EXAMPLES:
+    dsr doctor              Full diagnostics
+    dsr doctor --quick      Core deps only
+    dsr doctor --fix        Show remediation steps
+    dsr doctor --json       Machine-readable output
+EOF
+                return 0
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
     log_info "Running system diagnostics..."
+    $quick_mode && log_info "(quick mode - core checks only)"
+    echo ""
 
     local errors=0
     local warnings=0
     local checks=()
+    local fixes=()
 
     # Helper to escape JSON strings
     _json_escape() {
         printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\n/\\n/g'
     }
 
+    # Helper to add a check result
+    _add_check() {
+        local name="$1"
+        local status="$2"
+        local details="$3"
+        checks+=("{\"name\": \"$name\", \"status\": \"$status\"$details}")
+    }
+
+    # ========== CORE DEPENDENCIES ==========
+    log_info "Core dependencies:"
+
     # Check git
     if command -v git &>/dev/null; then
         local git_ver
         git_ver=$(git --version | cut -d' ' -f3)
-        checks+=("{\"name\": \"git\", \"status\": \"ok\", \"version\": \"$(_json_escape "$git_ver")\"}")
-        log_ok "git: $git_ver"
+        _add_check "git" "ok" ", \"version\": \"$(_json_escape "$git_ver")\""
+        log_ok "  git: $git_ver"
     else
-        checks+=("{\"name\": \"git\", \"status\": \"error\", \"message\": \"not found\"}")
-        log_error "git: not found"
+        _add_check "git" "error" ", \"message\": \"not found\""
+        log_error "  git: not found"
+        fixes+=("Install git: apt install git OR brew install git")
         ((errors++))
     fi
 
     # Check gh
     if command -v gh &>/dev/null; then
+        local gh_ver
+        gh_ver=$(gh --version 2>/dev/null | head -1 | awk '{print $3}')
         if gh auth status &>/dev/null 2>&1; then
-            checks+=("{\"name\": \"gh\", \"status\": \"ok\", \"authenticated\": true}")
-            log_ok "gh: authenticated"
+            local gh_user
+            gh_user=$(gh api user --jq '.login' 2>/dev/null || echo "unknown")
+            _add_check "gh" "ok" ", \"version\": \"$gh_ver\", \"authenticated\": true, \"user\": \"$gh_user\""
+            log_ok "  gh: $gh_ver (authenticated as $gh_user)"
         else
-            checks+=("{\"name\": \"gh\", \"status\": \"warning\", \"authenticated\": false}")
-            log_warn "gh: not authenticated (run: gh auth login)"
-            ((warnings++))
+            _add_check "gh" "error" ", \"version\": \"$gh_ver\", \"authenticated\": false"
+            log_error "  gh: not authenticated"
+            fixes+=("Authenticate GitHub CLI: gh auth login")
+            ((errors++))
         fi
     else
-        checks+=("{\"name\": \"gh\", \"status\": \"error\", \"message\": \"not found\"}")
-        log_error "gh: not found"
+        _add_check "gh" "error" ", \"message\": \"not found\""
+        log_error "  gh: not found"
+        fixes+=("Install GitHub CLI: brew install gh OR apt install gh")
         ((errors++))
     fi
+
+    # Check jq
+    if command -v jq &>/dev/null; then
+        local jq_ver
+        jq_ver=$(jq --version 2>/dev/null | sed 's/jq-//')
+        _add_check "jq" "ok" ", \"version\": \"$jq_ver\""
+        log_ok "  jq: $jq_ver"
+    else
+        _add_check "jq" "error" ", \"message\": \"not found\""
+        log_error "  jq: not found"
+        fixes+=("Install jq: brew install jq OR apt install jq")
+        ((errors++))
+    fi
+
+    # Check curl
+    if command -v curl &>/dev/null; then
+        local curl_ver
+        curl_ver=$(curl --version 2>/dev/null | head -1 | awk '{print $2}')
+        _add_check "curl" "ok" ", \"version\": \"$curl_ver\""
+        log_ok "  curl: $curl_ver"
+    else
+        _add_check "curl" "error" ", \"message\": \"not found\""
+        log_error "  curl: not found"
+        fixes+=("Install curl: apt install curl")
+        ((errors++))
+    fi
+
+    # Check yq (needed for config operations)
+    if command -v yq &>/dev/null; then
+        local yq_ver
+        yq_ver=$(yq --version 2>/dev/null | awk '{print $NF}')
+        _add_check "yq" "ok" ", \"version\": \"$yq_ver\""
+        log_ok "  yq: $yq_ver"
+    else
+        _add_check "yq" "warning" ", \"message\": \"not found\""
+        log_warn "  yq: not found (needed for config operations)"
+        fixes+=("Install yq: brew install yq OR snap install yq")
+        ((warnings++))
+    fi
+
+    # Quick mode stops here
+    if $quick_mode; then
+        echo ""
+        _doctor_summary "$errors" "$warnings" "$fix_mode"
+        [[ $errors -eq 0 ]] && return 0 || return 3
+    fi
+
+    # ========== BUILD TOOLS ==========
+    echo ""
+    log_info "Build tools:"
 
     # Check docker
     if command -v docker &>/dev/null; then
         if docker info &>/dev/null 2>&1; then
-            checks+=("{\"name\": \"docker\", \"status\": \"ok\", \"running\": true}")
-            log_ok "docker: running"
+            local docker_ver
+            docker_ver=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')
+            _add_check "docker" "ok" ", \"version\": \"$docker_ver\", \"running\": true"
+            log_ok "  docker: $docker_ver (running)"
         else
-            checks+=("{\"name\": \"docker\", \"status\": \"warning\", \"running\": false}")
-            log_warn "docker: not running"
+            _add_check "docker" "warning" ", \"running\": false"
+            log_warn "  docker: installed but not running"
+            fixes+=("Start Docker: systemctl start docker OR open Docker Desktop")
             ((warnings++))
         fi
     else
-        checks+=("{\"name\": \"docker\", \"status\": \"warning\", \"message\": \"not found\"}")
-        log_warn "docker: not found (needed for act)"
+        _add_check "docker" "warning" ", \"message\": \"not found\""
+        log_warn "  docker: not found (needed for act)"
+        fixes+=("Install Docker: https://docs.docker.com/get-docker/")
         ((warnings++))
     fi
 
@@ -355,61 +492,195 @@ cmd_doctor() {
     if command -v act &>/dev/null; then
         local act_ver
         act_ver=$(act --version 2>/dev/null | head -1)
-        checks+=("{\"name\": \"act\", \"status\": \"ok\", \"version\": \"$(_json_escape "$act_ver")\"}")
-        log_ok "act: $act_ver"
+        _add_check "act" "ok" ", \"version\": \"$(_json_escape "$act_ver")\""
+        log_ok "  act: $act_ver"
     else
-        checks+=("{\"name\": \"act\", \"status\": \"warning\", \"message\": \"not found\"}")
-        log_warn "act: not found (needed for local builds)"
+        _add_check "act" "warning" ", \"message\": \"not found\""
+        log_warn "  act: not found (needed for local builds)"
+        fixes+=("Install act: brew install act OR https://github.com/nektos/act/releases")
         ((warnings++))
     fi
 
-    # Check SSH to build hosts
+    # Check SSH
+    if command -v ssh &>/dev/null; then
+        _add_check "ssh" "ok" ""
+        log_ok "  ssh: available"
+    else
+        _add_check "ssh" "warning" ", \"message\": \"not found\""
+        log_warn "  ssh: not found (needed for remote builds)"
+        ((warnings++))
+    fi
+
+    # ========== SSH TO BUILD HOSTS ==========
+    echo ""
+    log_info "Build hosts:"
+
     for host in mmini wlap; do
-        if timeout 5 ssh -o ConnectTimeout=3 "$host" "echo ok" &>/dev/null 2>&1; then
-            checks+=("{\"name\": \"ssh-$host\", \"status\": \"ok\"}")
-            log_ok "ssh $host: reachable"
+        if timeout 5 ssh -o ConnectTimeout=3 -o BatchMode=yes "$host" "echo ok" &>/dev/null 2>&1; then
+            _add_check "ssh-$host" "ok" ""
+            log_ok "  $host: reachable"
         else
-            checks+=("{\"name\": \"ssh-$host\", \"status\": \"warning\", \"message\": \"unreachable\"}")
-            log_warn "ssh $host: unreachable"
+            _add_check "ssh-$host" "warning" ", \"message\": \"unreachable\""
+            log_warn "  $host: unreachable"
+            fixes+=("Check SSH config for $host: ssh $host")
             ((warnings++))
         fi
     done
 
-    # Check config
+    # ========== SIGNING TOOLS ==========
+    echo ""
+    log_info "Signing tools:"
+
+    # Check minisign
+    if command -v minisign &>/dev/null; then
+        local minisign_ver
+        minisign_ver=$(minisign -v 2>&1 | head -1 || echo "unknown")
+        _add_check "minisign" "ok" ", \"version\": \"$(_json_escape "$minisign_ver")\""
+        log_ok "  minisign: available"
+
+        # Check if key exists
+        if [[ -f "${SIGNING_PRIVATE_KEY:-$HOME/.config/dsr/secrets/minisign.key}" ]]; then
+            _add_check "minisign-key" "ok" ""
+            log_ok "  minisign key: configured"
+        else
+            _add_check "minisign-key" "warning" ", \"message\": \"not configured\""
+            log_warn "  minisign key: not configured"
+            fixes+=("Generate signing key: dsr signing init")
+            ((warnings++))
+        fi
+    else
+        _add_check "minisign" "warning" ", \"message\": \"not found\""
+        log_warn "  minisign: not found (needed for signing)"
+        fixes+=("Install minisign: brew install minisign")
+        ((warnings++))
+    fi
+
+    # Check syft (SBOM generation)
+    if command -v syft &>/dev/null; then
+        local syft_ver
+        syft_ver=$(syft --version 2>/dev/null | head -1 || echo "unknown")
+        _add_check "syft" "ok" ", \"version\": \"$(_json_escape "$syft_ver")\""
+        log_ok "  syft: $syft_ver"
+    else
+        _add_check "syft" "warning" ", \"message\": \"not found\""
+        log_warn "  syft: not found (needed for SBOM generation)"
+        fixes+=("Install syft: brew install syft OR https://github.com/anchore/syft/releases")
+        ((warnings++))
+    fi
+
+    # ========== NETWORK CONNECTIVITY ==========
+    echo ""
+    log_info "Network connectivity:"
+
+    # Check api.github.com
+    if curl -sf --max-time 5 "https://api.github.com" >/dev/null 2>&1; then
+        _add_check "network-api.github.com" "ok" ""
+        log_ok "  api.github.com: reachable"
+    else
+        _add_check "network-api.github.com" "warning" ", \"message\": \"unreachable\""
+        log_warn "  api.github.com: unreachable"
+        fixes+=("Check network connectivity to GitHub")
+        ((warnings++))
+    fi
+
+    # Check github.com
+    if curl -sf --max-time 5 "https://github.com" >/dev/null 2>&1; then
+        _add_check "network-github.com" "ok" ""
+        log_ok "  github.com: reachable"
+    else
+        _add_check "network-github.com" "warning" ", \"message\": \"unreachable\""
+        log_warn "  github.com: unreachable"
+        ((warnings++))
+    fi
+
+    # ========== DISK SPACE ==========
+    echo ""
+    log_info "Disk space:"
+
+    local disk_avail_kb disk_avail_gb
+    disk_avail_kb=$(df -k . 2>/dev/null | tail -1 | awk '{print $4}')
+    if [[ -n "$disk_avail_kb" ]]; then
+        disk_avail_gb=$((disk_avail_kb / 1024 / 1024))
+        if [[ $disk_avail_gb -lt 5 ]]; then
+            _add_check "disk-local" "warning" ", \"available_gb\": $disk_avail_gb"
+            log_warn "  local: ${disk_avail_gb}GB available (low)"
+            fixes+=("Free up disk space (< 5GB available)")
+            ((warnings++))
+        else
+            _add_check "disk-local" "ok" ", \"available_gb\": $disk_avail_gb"
+            log_ok "  local: ${disk_avail_gb}GB available"
+        fi
+    fi
+
+    # ========== CONFIG ==========
+    echo ""
+    log_info "Configuration:"
+
     config_load 2>/dev/null || true
     if config_validate &>/dev/null 2>&1; then
-        checks+=("{\"name\": \"config\", \"status\": \"ok\"}")
-        log_ok "config: valid"
+        _add_check "config" "ok" ""
+        log_ok "  config: valid"
     else
-        checks+=("{\"name\": \"config\", \"status\": \"warning\", \"message\": \"invalid or missing\"}")
-        log_warn "config: invalid or missing (run: dsr config init)"
+        _add_check "config" "warning" ", \"message\": \"invalid or missing\""
+        log_warn "  config: invalid or missing"
+        fixes+=("Initialize config: dsr config init")
         ((warnings++))
     fi
 
     # Summary
     echo ""
+    _doctor_summary "$errors" "$warnings" "$fix_mode"
+    [[ $errors -eq 0 ]] && return 0 || return 3
+}
+
+# Doctor summary helper - called at end to print summary and JSON output
+# Uses global arrays: checks[], fixes[]
+_doctor_summary() {
+    local errors="$1"
+    local warnings="$2"
+    local fix_mode="$3"
+
+    local exit_code=0
+    local overall_status="healthy"
+
     if [[ $errors -gt 0 ]]; then
         log_error "Found $errors error(s), $warnings warning(s)"
-        local exit_code=3
+        exit_code=3
+        overall_status="unhealthy"
     elif [[ $warnings -gt 0 ]]; then
         log_warn "Found $warnings warning(s)"
-        local exit_code=0
+        overall_status="degraded"
     else
         log_ok "All checks passed"
-        local exit_code=0
+    fi
+
+    # Show fixes if requested
+    if [[ "$fix_mode" == "true" && ${#fixes[@]} -gt 0 ]]; then
+        echo ""
+        log_info "Suggested fixes:"
+        for fix in "${fixes[@]}"; do
+            log_info "  → $fix"
+        done
     fi
 
     if $JSON_MODE; then
         local checks_json details_json
-        # Use compact output (-c) to avoid multiline issues in string interpolation
         checks_json=$(printf '%s\n' "${checks[@]}" | jq -sc '.')
-        # Build details as proper JSON object using jq for correctness
-        details_json=$(jq -nc --argjson errors "$errors" --argjson warnings "$warnings" --argjson checks "$checks_json" \
-            '{errors: $errors, warnings: $warnings, checks: $checks}')
-        json_envelope "doctor" "$([ $errors -eq 0 ] && echo success || echo error)" "$exit_code" "$details_json"
+        details_json=$(jq -nc \
+            --argjson errors "$errors" \
+            --argjson warnings "$warnings" \
+            --arg overall_status "$overall_status" \
+            --argjson checks "$checks_json" \
+            '{
+                overall_status: $overall_status,
+                errors: $errors,
+                warnings: $warnings,
+                checks: $checks
+            }')
+        local status_str
+        [[ "$errors" -eq 0 ]] && status_str="success" || status_str="error"
+        json_envelope "doctor" "$status_str" "$exit_code" "$details_json"
     fi
-
-    return $exit_code
 }
 
 # ============================================================================
@@ -1371,6 +1642,126 @@ cmd_repos_sync() {
 }
 
 # ============================================================================
+# HEALTH SUBCOMMAND
+# ============================================================================
+
+cmd_health() {
+    local subcmd="${1:-check}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        check)
+            cmd_health_check "$@"
+            ;;
+        all)
+            cmd_health_all "$@"
+            ;;
+        clear-cache)
+            cmd_health_clear_cache "$@"
+            ;;
+        --help|-h|help)
+            cat << 'EOF'
+dsr health - Check health of build hosts
+
+USAGE:
+    dsr health <subcommand> [options]
+
+SUBCOMMANDS:
+    check <host>    Check specific host health
+    all             Check all configured hosts
+    clear-cache     Clear health check cache
+
+OPTIONS:
+    --no-cache      Skip cache and perform fresh checks
+    --json          Output in JSON format (global)
+
+CHECKS PERFORMED:
+    - SSH connectivity (short timeout + BatchMode)
+    - Disk space threshold (warn >90%, error >95%)
+    - Toolchain availability (rust/go/bun per host)
+    - Docker/Colima for act runners
+    - Clock drift detection
+
+EXAMPLES:
+    dsr health check trj            Check local Threadripper
+    dsr health check mmini          Check Mac Mini via SSH
+    dsr health all                  Check all build hosts
+    dsr health all --no-cache       Force fresh checks
+    dsr health clear-cache          Clear cached results
+
+For more information, see docs/CLI_CONTRACT.md
+EOF
+            ;;
+        *)
+            # Treat as hostname if not a subcommand
+            cmd_health_check "$subcmd" "$@"
+            ;;
+    esac
+}
+
+cmd_health_check() {
+    local hostname="${1:-}"
+    shift 2>/dev/null || true
+    local no_cache=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-cache) no_cache=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ -z "$hostname" ]]; then
+        log_error "Usage: dsr health check <hostname>"
+        return 4
+    fi
+
+    local flags=""
+    $no_cache && flags+=" --no-cache"
+    $JSON_MODE && flags+=" --json"
+
+    # shellcheck disable=SC2086  # flags needs word splitting
+    host_health_check "$hostname" $flags
+}
+
+cmd_health_all() {
+    local no_cache=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-cache) no_cache=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local flags=""
+    $no_cache && flags+=" --no-cache"
+    $JSON_MODE && flags+=" --json"
+
+    # shellcheck disable=SC2086  # flags needs word splitting
+    host_health_check_all $flags
+}
+
+cmd_health_clear_cache() {
+    local hostname="${1:-}"
+    host_health_clear_cache "$hostname"
+
+    if $JSON_MODE; then
+        if [[ -n "$hostname" ]]; then
+            json_envelope "health" "success" 0 "{\"action\": \"clear-cache\", \"host\": \"$hostname\"}"
+        else
+            json_envelope "health" "success" 0 '{"action": "clear-cache", "all": true}'
+        fi
+    else
+        if [[ -n "$hostname" ]]; then
+            log_ok "Cleared health cache for: $hostname"
+        else
+            log_ok "Cleared all health cache"
+        fi
+    fi
+}
+
+# ============================================================================
 # SIGNING SUBCOMMAND
 # ============================================================================
 
@@ -1523,6 +1914,9 @@ main() {
             ;;
         repos)
             cmd_repos "$@"
+            ;;
+        health)
+            cmd_health "$@"
             ;;
         signing)
             cmd_signing "$@"
