@@ -31,11 +31,16 @@ ARCHIVE_FORMAT_WINDOWS="zip"
 # shellcheck disable=SC2154  # ${name} etc are literal patterns substituted at runtime
 ARTIFACT_NAMING="${name}-${version}-${os}-${arch}"
 
+# Minisign public key for signature verification (embedded from dsr config)
+# If empty, signature verification is skipped
+MINISIGN_PUBKEY=""
+
 # Runtime state
 _VERSION=""
 _INSTALL_DIR="${HOME}/.local/bin"
 _JSON_MODE=false
 _VERIFY=false
+_REQUIRE_SIGNATURES=false
 _NON_INTERACTIVE=false
 _AUTO_YES=false
 _OFFLINE_ARCHIVE=""
@@ -204,6 +209,62 @@ _download_and_verify() {
     return 0
 }
 
+# Verify minisign signature
+_verify_minisign() {
+    local file="$1"
+    local sig_url="$2"
+
+    # Skip if no public key configured
+    if [[ -z "$MINISIGN_PUBKEY" || "$MINISIGN_PUBKEY" == "" ]]; then
+        if $_REQUIRE_SIGNATURES; then
+            _log_error "Signature verification required but no public key configured"
+            return 1
+        fi
+        return 0
+    fi
+
+    # Check if minisign is available
+    if ! command -v minisign &>/dev/null; then
+        if $_REQUIRE_SIGNATURES; then
+            _log_error "minisign required for signature verification but not installed"
+            _log_info "Install: https://jedisct1.github.io/minisign/"
+            return 1
+        fi
+        _log_warn "minisign not available - skipping signature verification"
+        return 0
+    fi
+
+    # Download signature
+    local sig_file="${file}.minisig"
+    _log_info "Downloading signature..."
+    if ! curl -sSfL "$sig_url" -o "$sig_file" 2>/dev/null; then
+        if $_REQUIRE_SIGNATURES; then
+            _log_error "Signature download failed"
+            return 1
+        fi
+        _log_warn "No signature available - skipping verification"
+        return 0
+    fi
+
+    # Create temp file for public key
+    local pubkey_file
+    pubkey_file=$(mktemp)
+    echo "$MINISIGN_PUBKEY" > "$pubkey_file"
+
+    # Verify
+    _log_info "Verifying signature..."
+    if minisign -Vm "$file" -p "$pubkey_file" 2>/dev/null; then
+        _log_ok "Signature verified"
+        rm -f "$pubkey_file" "$sig_file"
+        return 0
+    else
+        _log_error "Signature verification FAILED!"
+        _log_error "The file may have been tampered with."
+        rm -f "$pubkey_file" "$sig_file"
+        return 1
+    fi
+}
+
 # Extract archive
 _extract_archive() {
     local archive="$1"
@@ -295,6 +356,11 @@ main() {
                 _VERIFY=true
                 shift
                 ;;
+            --require-signatures)
+                _REQUIRE_SIGNATURES=true
+                _VERIFY=true
+                shift
+                ;;
             --json)
                 _JSON_MODE=true
                 shift
@@ -364,6 +430,12 @@ main() {
         fi
 
         _download_and_verify "$download_url" "$archive_file" "$checksums_url" || return $?
+
+        # Verify minisign signature if available
+        if $_VERIFY || $_REQUIRE_SIGNATURES; then
+            local sig_url="${download_url}.minisig"
+            _verify_minisign "$archive_file" "$sig_url" || return $?
+        fi
     fi
 
     # Extract
