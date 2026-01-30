@@ -178,6 +178,77 @@ test_log_timed() {
     fi
 }
 
+# ============================================================================
+# XDG Layout Tests (bd-1jt.5.10 criteria)
+# ============================================================================
+
+# Test: log_init creates date-based directory
+test_log_init_creates_date_dir() {
+    ((TESTS_RUN++))
+    # Reset log file to force date-based init
+    unset DSR_LOG_FILE
+    LOG_FILE=""
+    local expected_date
+    expected_date=$(date +%Y-%m-%d)
+    log_init
+    if [[ -d "$DSR_STATE_DIR/logs/$expected_date" ]]; then
+        pass "log_init creates date-based directory"
+    else
+        fail "log_init should create $DSR_STATE_DIR/logs/$expected_date"
+    fi
+}
+
+# Test: log_init creates builds subdirectory
+test_log_init_creates_builds_dir() {
+    ((TESTS_RUN++))
+    unset DSR_LOG_FILE
+    LOG_FILE=""
+    local expected_date
+    expected_date=$(date +%Y-%m-%d)
+    log_init
+    if [[ -d "$DSR_STATE_DIR/logs/$expected_date/builds" ]]; then
+        pass "log_init creates builds subdirectory"
+    else
+        fail "log_init should create builds subdirectory"
+    fi
+}
+
+# Test: log_init creates latest symlink
+test_log_init_creates_latest_symlink() {
+    ((TESTS_RUN++))
+    unset DSR_LOG_FILE
+    LOG_FILE=""
+    local expected_date
+    expected_date=$(date +%Y-%m-%d)
+    log_init
+    if [[ -L "$DSR_STATE_DIR/logs/latest" ]]; then
+        local target
+        target=$(readlink "$DSR_STATE_DIR/logs/latest")
+        if [[ "$target" == "$expected_date" ]]; then
+            pass "log_init creates latest symlink"
+        else
+            fail "latest symlink should point to $expected_date, got $target"
+        fi
+    else
+        fail "log_init should create logs/latest symlink"
+    fi
+}
+
+# Test: log file is created under date directory
+test_log_file_under_date_dir() {
+    ((TESTS_RUN++))
+    unset DSR_LOG_FILE
+    LOG_FILE=""
+    local expected_date
+    expected_date=$(date +%Y-%m-%d)
+    log_init
+    if [[ "$LOG_FILE" == "$DSR_STATE_DIR/logs/$expected_date/run.log" ]]; then
+        pass "log file is under date directory"
+    else
+        fail "LOG_FILE should be under date dir, got: $LOG_FILE"
+    fi
+}
+
 # Cleanup
 cleanup() {
     rm -rf "$TEMP_DIR"
@@ -200,6 +271,13 @@ test_quiet_mode
 test_json_escape
 test_log_get_run_id
 test_log_timed
+
+echo ""
+echo "XDG Layout Tests:"
+test_log_init_creates_date_dir
+test_log_init_creates_builds_dir
+test_log_init_creates_latest_symlink
+test_log_file_under_date_dir
 
 echo ""
 echo "=========================================="
