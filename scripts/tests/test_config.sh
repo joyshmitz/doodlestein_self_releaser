@@ -1,0 +1,602 @@
+#!/usr/bin/env bash
+# test_config.sh - Tests for config.sh module
+#
+# Tests XDG-compliant configuration management.
+# Uses isolated temp directories for each test.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_DIR="$(cd "$SCRIPT_DIR/../../src" && pwd)"
+
+# Source the module under test
+# shellcheck source=../../src/logging.sh
+source "$SRC_DIR/logging.sh"
+# shellcheck source=../../src/config.sh
+source "$SRC_DIR/config.sh"
+
+# Test state
+TEMP_DIR=""
+TESTS_RUN=0
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+# Original XDG values (to restore after tests)
+_ORIG_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
+_ORIG_XDG_CACHE_HOME="${XDG_CACHE_HOME:-}"
+_ORIG_XDG_STATE_HOME="${XDG_STATE_HOME:-}"
+
+# Initialize logging silently
+log_init 2>/dev/null || true
+
+# Suppress colors for consistent output
+export NO_COLOR=1
+
+# ============================================================================
+# Test Infrastructure
+# ============================================================================
+
+setup() {
+  TEMP_DIR=$(mktemp -d)
+
+  # Set up isolated XDG directories
+  export XDG_CONFIG_HOME="$TEMP_DIR/config"
+  export XDG_CACHE_HOME="$TEMP_DIR/cache"
+  export XDG_STATE_HOME="$TEMP_DIR/state"
+
+  # Re-initialize config module paths
+  DSR_CONFIG_DIR="$XDG_CONFIG_HOME/dsr"
+  DSR_CACHE_DIR="$XDG_CACHE_HOME/dsr"
+  DSR_STATE_DIR="$XDG_STATE_HOME/dsr"
+  DSR_CONFIG_FILE="$DSR_CONFIG_DIR/config.yaml"
+  DSR_REPOS_FILE="$DSR_CONFIG_DIR/repos.yaml"
+  DSR_HOSTS_FILE="$DSR_CONFIG_DIR/hosts.yaml"
+
+  # Reset config array
+  DSR_CONFIG=()
+}
+
+teardown() {
+  if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
+    rm -rf "$TEMP_DIR"
+  fi
+
+  # Restore original XDG values
+  export XDG_CONFIG_HOME="$_ORIG_XDG_CONFIG_HOME"
+  export XDG_CACHE_HOME="$_ORIG_XDG_CACHE_HOME"
+  export XDG_STATE_HOME="$_ORIG_XDG_STATE_HOME"
+}
+
+assert_equals() {
+  local expected="$1"
+  local actual="$2"
+  local msg="${3:-assertion failed}"
+
+  if [[ "$expected" != "$actual" ]]; then
+    echo "  FAIL: $msg"
+    echo "    Expected: $expected"
+    echo "    Actual:   $actual"
+    return 1
+  fi
+  return 0
+}
+
+assert_true() {
+  local condition="$1"
+  local msg="${2:-expected true}"
+
+  if ! eval "$condition"; then
+    echo "  FAIL: $msg"
+    return 1
+  fi
+  return 0
+}
+
+assert_false() {
+  local condition="$1"
+  local msg="${2:-expected false}"
+
+  if eval "$condition"; then
+    echo "  FAIL: $msg"
+    return 1
+  fi
+  return 0
+}
+
+run_test() {
+  local test_name="$1"
+  local test_func="$2"
+
+  ((TESTS_RUN++))
+  echo -n "  $test_name... "
+
+  setup
+
+  if $test_func 2>/dev/null; then
+    echo "OK"
+    ((TESTS_PASSED++))
+  else
+    echo "FAILED"
+    ((TESTS_FAILED++))
+  fi
+
+  teardown
+}
+
+# ============================================================================
+# Tests: Initialization (config_init)
+# ============================================================================
+
+test_init_creates_config_dir() {
+  config_init
+  [[ -d "$DSR_CONFIG_DIR" ]]
+}
+
+test_init_creates_cache_dir() {
+  config_init
+  [[ -d "$DSR_CACHE_DIR" ]]
+}
+
+test_init_creates_state_dir() {
+  config_init
+  [[ -d "$DSR_STATE_DIR" ]]
+}
+
+test_init_creates_subdirs() {
+  config_init
+  [[ -d "$DSR_STATE_DIR/logs" ]] && \
+  [[ -d "$DSR_STATE_DIR/artifacts" ]] && \
+  [[ -d "$DSR_STATE_DIR/manifests" ]] && \
+  [[ -d "$DSR_CACHE_DIR/act" ]] && \
+  [[ -d "$DSR_CACHE_DIR/builds" ]]
+}
+
+test_init_creates_config_yaml() {
+  config_init
+  [[ -f "$DSR_CONFIG_FILE" ]]
+}
+
+test_init_creates_hosts_yaml() {
+  config_init
+  [[ -f "$DSR_HOSTS_FILE" ]]
+}
+
+test_init_creates_repos_yaml() {
+  config_init
+  [[ -f "$DSR_REPOS_FILE" ]]
+}
+
+test_init_no_overwrite() {
+  config_init
+  # Write custom content
+  echo "custom: value" > "$DSR_CONFIG_FILE"
+  config_init  # Should not overwrite
+  grep -q "custom: value" "$DSR_CONFIG_FILE"
+}
+
+test_init_force_overwrites() {
+  config_init
+  # Write custom content
+  echo "custom: value" > "$DSR_CONFIG_FILE"
+  config_init --force  # Should overwrite
+  ! grep -q "custom: value" "$DSR_CONFIG_FILE"
+}
+
+test_init_config_has_schema_version() {
+  config_init
+  grep -q "schema_version:" "$DSR_CONFIG_FILE"
+}
+
+test_init_hosts_has_hosts() {
+  config_init
+  grep -q "hosts:" "$DSR_HOSTS_FILE"
+}
+
+test_init_repos_has_tools() {
+  config_init
+  grep -q "tools:" "$DSR_REPOS_FILE"
+}
+
+# ============================================================================
+# Tests: Loading (config_load)
+# ============================================================================
+
+test_load_sets_defaults() {
+  config_load
+  [[ -n "${DSR_CONFIG[threshold_seconds]:-}" ]] && \
+  [[ -n "${DSR_CONFIG[log_level]:-}" ]]
+}
+
+test_load_default_threshold() {
+  config_load
+  [[ "${DSR_CONFIG[threshold_seconds]}" == "600" ]]
+}
+
+test_load_default_log_level() {
+  config_load
+  [[ "${DSR_CONFIG[log_level]}" == "info" ]]
+}
+
+test_load_reads_config_file() {
+  config_init
+  # Add custom value to config
+  echo "custom_key: custom_value" >> "$DSR_CONFIG_FILE"
+  config_load
+  [[ "${DSR_CONFIG[custom_key]:-}" == "custom_value" ]]
+}
+
+test_load_env_overrides_file() {
+  config_init
+  config_load
+  # Set env var override
+  export DSR_LOG_LEVEL="debug"
+  config_load
+  local result="${DSR_CONFIG[log_level]}"
+  unset DSR_LOG_LEVEL
+  [[ "$result" == "debug" ]]
+}
+
+test_load_threshold_env_override() {
+  config_init
+  export DSR_THRESHOLD="1200"
+  config_load
+  local result="${DSR_CONFIG[threshold_seconds]}"
+  unset DSR_THRESHOLD
+  [[ "$result" == "1200" ]]
+}
+
+test_load_signing_disabled_by_env() {
+  config_init
+  export DSR_NO_SIGN="1"
+  config_load
+  local result="${DSR_CONFIG[signing_enabled]}"
+  unset DSR_NO_SIGN
+  [[ "$result" == "false" ]]
+}
+
+test_load_resets_config() {
+  config_load
+  DSR_CONFIG[test_key]="test_value"
+  config_load  # Should reset
+  [[ -z "${DSR_CONFIG[test_key]:-}" ]]
+}
+
+# ============================================================================
+# Tests: Get/Set (config_get, config_set)
+# ============================================================================
+
+test_get_returns_value() {
+  config_load
+  local result
+  result=$(config_get "threshold_seconds")
+  [[ "$result" == "600" ]]
+}
+
+test_get_returns_default() {
+  config_load
+  local result
+  result=$(config_get "nonexistent_key" "default_value")
+  [[ "$result" == "default_value" ]]
+}
+
+test_get_returns_empty_for_missing() {
+  config_load
+  local result
+  result=$(config_get "nonexistent_key")
+  [[ -z "$result" ]]
+}
+
+test_set_updates_value() {
+  config_load
+  config_set "threshold_seconds" "1800"
+  local result
+  result=$(config_get "threshold_seconds")
+  [[ "$result" == "1800" ]]
+}
+
+test_set_creates_new_key() {
+  config_load
+  config_set "new_key" "new_value"
+  local result
+  result=$(config_get "new_key")
+  [[ "$result" == "new_value" ]]
+}
+
+test_set_persist_requires_yq() {
+  config_init
+  config_load
+  # This test just verifies the function doesn't crash
+  # Actual persistence depends on yq availability
+  config_set "test_key" "test_value" --persist || true
+  [[ "${DSR_CONFIG[test_key]}" == "test_value" ]]
+}
+
+# ============================================================================
+# Tests: Validation (config_validate)
+# ============================================================================
+
+test_validate_passes_with_init() {
+  config_init
+  config_load
+  config_validate
+}
+
+test_validate_fails_missing_dir() {
+  # Don't init, dir doesn't exist
+  ! config_validate
+}
+
+test_validate_checks_schema_version() {
+  config_init
+  config_load
+  # Remove schema_version
+  DSR_CONFIG=()
+  ! config_validate
+}
+
+# ============================================================================
+# Tests: Show (config_show)
+# ============================================================================
+
+test_show_human_output() {
+  config_init
+  config_load
+  local output
+  output=$(config_show)
+  [[ "$output" == *"dsr Configuration"* ]] && \
+  [[ "$output" == *"Directories"* ]] && \
+  [[ "$output" == *"Values"* ]]
+}
+
+test_show_json_output() {
+  config_init
+  config_load
+  local output
+  output=$(config_show --json)
+  [[ "$output" == "{"* ]] && \
+  [[ "$output" == *"config_dir"* ]] && \
+  [[ "$output" == *"values"* ]]
+}
+
+test_show_specific_key() {
+  config_init
+  config_load
+  local output
+  output=$(config_show threshold_seconds)
+  [[ "$output" == *"threshold_seconds"* ]] && \
+  [[ "$output" == *"600"* ]]
+}
+
+test_show_json_specific_key() {
+  config_init
+  config_load
+  local output
+  output=$(config_show --json threshold_seconds)
+  [[ "$output" == *"threshold_seconds"* ]]
+}
+
+# ============================================================================
+# Tests: XDG Compliance
+# ============================================================================
+
+test_xdg_config_home_override() {
+  local custom_config="$TEMP_DIR/custom_config"
+  mkdir -p "$custom_config"
+  export XDG_CONFIG_HOME="$custom_config"
+
+  # Re-initialize paths
+  DSR_CONFIG_DIR="$XDG_CONFIG_HOME/dsr"
+  DSR_CONFIG_FILE="$DSR_CONFIG_DIR/config.yaml"
+
+  config_init
+  [[ -d "$custom_config/dsr" ]]
+}
+
+test_xdg_cache_home_override() {
+  local custom_cache="$TEMP_DIR/custom_cache"
+  mkdir -p "$custom_cache"
+  export XDG_CACHE_HOME="$custom_cache"
+
+  # Re-initialize paths
+  DSR_CACHE_DIR="$XDG_CACHE_HOME/dsr"
+
+  config_init
+  [[ -d "$custom_cache/dsr" ]]
+}
+
+test_xdg_state_home_override() {
+  local custom_state="$TEMP_DIR/custom_state"
+  mkdir -p "$custom_state"
+  export XDG_STATE_HOME="$custom_state"
+
+  # Re-initialize paths
+  DSR_STATE_DIR="$XDG_STATE_HOME/dsr"
+
+  config_init
+  [[ -d "$custom_state/dsr" ]]
+}
+
+# ============================================================================
+# Tests: Host/Tool Configuration
+# ============================================================================
+
+test_get_host_for_platform_linux() {
+  config_init
+  local host
+  host=$(config_get_host_for_platform "linux/amd64")
+  [[ "$host" == "trj" || "$host" == "\"trj\"" ]]
+}
+
+test_get_host_for_platform_darwin() {
+  config_init
+  local host
+  host=$(config_get_host_for_platform "darwin/arm64")
+  [[ "$host" == "mmini" || "$host" == "\"mmini\"" ]]
+}
+
+test_get_host_for_platform_windows() {
+  config_init
+  local host
+  host=$(config_get_host_for_platform "windows/amd64")
+  [[ "$host" == "wlap" || "$host" == "\"wlap\"" ]]
+}
+
+test_list_hosts_returns_hosts() {
+  config_init
+  # Skip if yq not available
+  command -v yq &>/dev/null || return 0
+  local output
+  output=$(config_list_hosts)
+  [[ "$output" == *"trj"* ]] && \
+  [[ "$output" == *"mmini"* ]] && \
+  [[ "$output" == *"wlap"* ]]
+}
+
+test_get_host_returns_config() {
+  config_init
+  # Skip if yq not available
+  command -v yq &>/dev/null || return 0
+  local output
+  output=$(config_get_host "trj")
+  [[ "$output" == *"linux/amd64"* ]] || [[ "$output" == *"local"* ]]
+}
+
+# ============================================================================
+# Tests: Edge Cases
+# ============================================================================
+
+test_load_handles_empty_config() {
+  config_init
+  # Create empty config file
+  : > "$DSR_CONFIG_FILE"
+  config_load  # Should not crash
+  [[ -n "${DSR_CONFIG[threshold_seconds]:-}" ]]  # Defaults still applied
+}
+
+test_load_handles_comments() {
+  config_init
+  cat > "$DSR_CONFIG_FILE" << 'EOF'
+# This is a comment
+schema_version: "1.0.0"
+# Another comment
+threshold_seconds: 300
+EOF
+  config_load
+  [[ "${DSR_CONFIG[threshold_seconds]}" == "300" ]]
+}
+
+test_load_handles_quoted_values() {
+  config_init
+  cat > "$DSR_CONFIG_FILE" << 'EOF'
+schema_version: "1.0.0"
+quoted_key: "quoted value"
+single_quoted: 'single quoted'
+EOF
+  config_load
+  [[ "${DSR_CONFIG[quoted_key]}" == "quoted value" ]] && \
+  [[ "${DSR_CONFIG[single_quoted]}" == "single quoted" ]]
+}
+
+test_config_file_env_override() {
+  config_init
+  local custom_config="$TEMP_DIR/custom.yaml"
+  cat > "$custom_config" << 'EOF'
+schema_version: "1.0.0"
+threshold_seconds: 9999
+EOF
+  export DSR_CONFIG_FILE="$custom_config"
+  config_load
+  local result="${DSR_CONFIG[threshold_seconds]}"
+  unset DSR_CONFIG_FILE
+  [[ "$result" == "9999" ]]
+}
+
+# ============================================================================
+# Main Test Runner
+# ============================================================================
+
+main() {
+  echo "=== config.sh Tests ==="
+  echo ""
+
+  echo "Initialization Tests:"
+  run_test "init_creates_config_dir" test_init_creates_config_dir
+  run_test "init_creates_cache_dir" test_init_creates_cache_dir
+  run_test "init_creates_state_dir" test_init_creates_state_dir
+  run_test "init_creates_subdirs" test_init_creates_subdirs
+  run_test "init_creates_config_yaml" test_init_creates_config_yaml
+  run_test "init_creates_hosts_yaml" test_init_creates_hosts_yaml
+  run_test "init_creates_repos_yaml" test_init_creates_repos_yaml
+  run_test "init_no_overwrite" test_init_no_overwrite
+  run_test "init_force_overwrites" test_init_force_overwrites
+  run_test "init_config_has_schema_version" test_init_config_has_schema_version
+  run_test "init_hosts_has_hosts" test_init_hosts_has_hosts
+  run_test "init_repos_has_tools" test_init_repos_has_tools
+
+  echo ""
+  echo "Loading Tests:"
+  run_test "load_sets_defaults" test_load_sets_defaults
+  run_test "load_default_threshold" test_load_default_threshold
+  run_test "load_default_log_level" test_load_default_log_level
+  run_test "load_reads_config_file" test_load_reads_config_file
+  run_test "load_env_overrides_file" test_load_env_overrides_file
+  run_test "load_threshold_env_override" test_load_threshold_env_override
+  run_test "load_signing_disabled_by_env" test_load_signing_disabled_by_env
+  run_test "load_resets_config" test_load_resets_config
+
+  echo ""
+  echo "Get/Set Tests:"
+  run_test "get_returns_value" test_get_returns_value
+  run_test "get_returns_default" test_get_returns_default
+  run_test "get_returns_empty_for_missing" test_get_returns_empty_for_missing
+  run_test "set_updates_value" test_set_updates_value
+  run_test "set_creates_new_key" test_set_creates_new_key
+  run_test "set_persist_requires_yq" test_set_persist_requires_yq
+
+  echo ""
+  echo "Validation Tests:"
+  run_test "validate_passes_with_init" test_validate_passes_with_init
+  run_test "validate_fails_missing_dir" test_validate_fails_missing_dir
+  run_test "validate_checks_schema_version" test_validate_checks_schema_version
+
+  echo ""
+  echo "Show Tests:"
+  run_test "show_human_output" test_show_human_output
+  run_test "show_json_output" test_show_json_output
+  run_test "show_specific_key" test_show_specific_key
+  run_test "show_json_specific_key" test_show_json_specific_key
+
+  echo ""
+  echo "XDG Compliance Tests:"
+  run_test "xdg_config_home_override" test_xdg_config_home_override
+  run_test "xdg_cache_home_override" test_xdg_cache_home_override
+  run_test "xdg_state_home_override" test_xdg_state_home_override
+
+  echo ""
+  echo "Host/Tool Configuration Tests:"
+  run_test "get_host_for_platform_linux" test_get_host_for_platform_linux
+  run_test "get_host_for_platform_darwin" test_get_host_for_platform_darwin
+  run_test "get_host_for_platform_windows" test_get_host_for_platform_windows
+  run_test "list_hosts_returns_hosts" test_list_hosts_returns_hosts
+  run_test "get_host_returns_config" test_get_host_returns_config
+
+  echo ""
+  echo "Edge Case Tests:"
+  run_test "load_handles_empty_config" test_load_handles_empty_config
+  run_test "load_handles_comments" test_load_handles_comments
+  run_test "load_handles_quoted_values" test_load_handles_quoted_values
+  run_test "config_file_env_override" test_config_file_env_override
+
+  echo ""
+  echo "=== Results ==="
+  echo "Tests run:    $TESTS_RUN"
+  echo "Tests passed: $TESTS_PASSED"
+  echo "Tests failed: $TESTS_FAILED"
+
+  if [[ $TESTS_FAILED -gt 0 ]]; then
+    exit 1
+  fi
+  exit 0
+}
+
+main "$@"
