@@ -1,0 +1,23 @@
+{
+  "command": "config",
+  "status": "success",
+  "exit_code": 0,
+  "run_id": "550e8400-e29b-41d4-a716-446655440020",
+  "started_at": "2026-01-30T15:50:00Z",
+  "completed_at": "2026-01-30T15:50:03Z",
+  "duration_ms": 3000,
+  "tool": "dsr",
+  "version": "1.0.0",
+  "schema_version": "1.0.0",
+  "artifacts": [],
+  "warnings": [],
+  "errors": [],
+  "details": {
+    "action": "migrate",
+    "from_version": "0.9.0",
+    "to_version": "1.0.0",
+    "config_file": "~/.config/dsr/config.yaml",
+    "backup_path": "~/.config/dsr/config.yaml.bak",
+    "changed_keys": ["threshold_seconds"]
+  }
+}

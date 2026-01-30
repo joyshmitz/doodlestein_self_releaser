@@ -1,0 +1,40 @@
+{
+  "command": "report",
+  "status": "success",
+  "exit_code": 0,
+  "run_id": "550e8400-e29b-41d4-a716-446655440014",
+  "started_at": "2026-01-30T15:20:00Z",
+  "completed_at": "2026-01-30T15:20:04Z",
+  "duration_ms": 4000,
+  "tool": "dsr",
+  "version": "1.0.0",
+  "schema_version": "1.0.0",
+  "artifacts": [],
+  "warnings": [],
+  "errors": [],
+  "details": {
+    "generated_at": "2026-01-30T15:20:04Z",
+    "summary": {
+      "runs_last_24h": 12,
+      "failures_last_24h": 1,
+      "throttled_repos": 0
+    },
+    "recent_runs": [
+      {
+        "repo": "ntm",
+        "command": "build",
+        "status": "success",
+        "exit_code": 0,
+        "duration_ms": 32000
+      },
+      {
+        "repo": "bv",
+        "command": "check",
+        "status": "success",
+        "exit_code": 0,
+        "duration_ms": 900
+      }
+    ],
+    "alerts": []
+  }
+}

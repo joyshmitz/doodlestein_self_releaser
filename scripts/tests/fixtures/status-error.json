@@ -1,0 +1,41 @@
+{
+  "command": "status",
+  "status": "error",
+  "exit_code": 3,
+  "run_id": "550e8400-e29b-41d4-a716-446655440012",
+  "started_at": "2026-01-30T15:10:00Z",
+  "completed_at": "2026-01-30T15:10:03Z",
+  "duration_ms": 3000,
+  "tool": "dsr",
+  "version": "1.0.0",
+  "schema_version": "1.0.0",
+  "artifacts": [],
+  "warnings": [],
+  "errors": [
+    {"code": "E040", "message": "Docker not running"}
+  ],
+  "details": {
+    "generated_at": "2026-01-30T15:10:03Z",
+    "overall_status": "error",
+    "config": {
+      "valid": false,
+      "path": "~/.config/dsr/config.yaml"
+    },
+    "hosts": [
+      {
+        "host": "trj",
+        "status": "error",
+        "message": "docker unavailable"
+      }
+    ],
+    "last_run": {
+      "command": "build",
+      "status": "error",
+      "exit_code": 6,
+      "run_id": "550e8400-e29b-41d4-a716-446655440013",
+      "started_at": "2026-01-30T15:05:00Z",
+      "completed_at": "2026-01-30T15:06:00Z",
+      "duration_ms": 60000
+    }
+  }
+}

@@ -36,6 +36,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source modules
 source "$SCRIPT_DIR/src/config.sh"
 source "$SCRIPT_DIR/src/signing.sh"
+source "$SCRIPT_DIR/src/github.sh"
 
 # Global flags
 JSON_MODE=false
@@ -115,7 +116,7 @@ show_version() {
 # Usage: json_envelope <command> <status> <exit_code> [details_json]
 json_envelope() {
     local cmd="$1"
-    local status="$2"
+    local vstatus="$2"  # renamed to avoid potential conflict
     local exit_code="$3"
     local details="${4:-{}}"
     local run_id
@@ -123,10 +124,13 @@ json_envelope() {
     local started_at
     started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+    # DEBUG
+    echo "DEBUG in json_envelope: details braces: $(echo "$details" | tr -cd '{' | wc -c) { $(echo "$details" | tr -cd '}' | wc -c) }" >&2
+
     cat << EOF
 {
   "command": "$cmd",
-  "status": "$status",
+  "status": "$vstatus",
   "exit_code": $exit_code,
   "run_id": "$run_id",
   "started_at": "$started_at",
@@ -416,6 +420,10 @@ cmd_doctor() {
         # Build details as proper JSON object using jq for correctness
         details_json=$(jq -nc --argjson errors "$errors" --argjson warnings "$warnings" --argjson checks "$checks_json" \
             '{errors: $errors, warnings: $warnings, checks: $checks}')
+        # DEBUG
+        echo "DEBUG checks_json braces: $(echo "$checks_json" | tr -cd '{' | wc -c) { $(echo "$checks_json" | tr -cd '}' | wc -c) }" >&2
+        echo "DEBUG details_json braces: $(echo "$details_json" | tr -cd '{' | wc -c) { $(echo "$details_json" | tr -cd '}' | wc -c) }" >&2
+        echo "DEBUG details_json last 30: ${details_json: -30}" >&2
         json_envelope "doctor" "$([ $errors -eq 0 ] && echo success || echo error)" $exit_code "$details_json"
     fi
 

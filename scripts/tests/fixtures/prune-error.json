@@ -1,0 +1,27 @@
+{
+  "command": "prune",
+  "status": "error",
+  "exit_code": 4,
+  "run_id": "550e8400-e29b-41d4-a716-446655440017",
+  "started_at": "2026-01-30T15:31:00Z",
+  "completed_at": "2026-01-30T15:31:02Z",
+  "duration_ms": 2000,
+  "tool": "dsr",
+  "version": "1.0.0",
+  "schema_version": "1.0.0",
+  "artifacts": [],
+  "warnings": [],
+  "errors": [
+    {"code": "E050", "message": "state directory not found"}
+  ],
+  "details": {
+    "state_dir": "~/.local/state/dsr",
+    "dry_run": true,
+    "cutoff_days": 30,
+    "pruned_count": 0,
+    "bytes_freed": 0,
+    "errors": [
+      {"code": "E050", "message": "state directory not found"}
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "command": "repos",
+  "status": "success",
+  "exit_code": 0,
+  "run_id": "550e8400-e29b-41d4-a716-446655440018",
+  "started_at": "2026-01-30T15:40:00Z",
+  "completed_at": "2026-01-30T15:40:02Z",
+  "duration_ms": 2000,
+  "tool": "dsr",
+  "version": "1.0.0",
+  "schema_version": "1.0.0",
+  "artifacts": [],
+  "warnings": [],
+  "errors": [],
+  "details": {
+    "action": "list",
+    "repos": [
+      {
+        "name": "ntm",
+        "repo": "dicklesworthstone/ntm",
+        "local_path": "/data/projects/ntm",
+        "language": "go",
+        "targets": ["linux/amd64", "darwin/arm64", "windows/amd64"],
+        "enabled": true
+      }
+    ]
+  }
+}
