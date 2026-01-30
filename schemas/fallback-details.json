@@ -2,112 +2,70 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Dicklesworthstone/doodlestein_self_releaser/schemas/fallback-details.json",
   "title": "DSR Fallback Details",
-  "description": "Details payload for 'dsr fallback' command - full pipeline execution",
+  "description": "Details payload for 'dsr fallback' command",
   "type": "object",
-  "required": ["repo", "version", "stages"],
+  "required": ["repo", "steps"],
   "properties": {
     "repo": {
       "type": "string",
-      "description": "Repository that was processed"
+      "description": "Repository name"
     },
     "version": {
       "type": "string",
-      "description": "Version/tag that was built and released"
+      "description": "Version/tag used for the fallback"
     },
     "trigger": {
       "type": "string",
-      "enum": ["manual", "throttle-detected", "ci-failure", "scheduled"],
-      "description": "What triggered the fallback"
+      "description": "Reason the fallback was triggered"
     },
-    "stages": {
+    "steps": {
       "type": "array",
-      "items": { "$ref": "#/$defs/pipeline_stage" },
-      "description": "Pipeline stages executed"
+      "items": { "$ref": "#/$defs/fallback_step" },
+      "description": "Steps executed during fallback"
     },
-    "check_result": {
-      "type": "object",
-      "description": "Embedded check command result",
-      "properties": {
-        "throttled": { "type": "boolean" },
-        "queue_time_seconds": { "type": "integer" },
-        "threshold_seconds": { "type": "integer" }
-      }
-    },
-    "build_result": {
-      "type": "object",
-      "description": "Embedded build command result",
-      "properties": {
-        "targets_succeeded": { "type": "integer" },
-        "targets_failed": { "type": "integer" },
-        "manifest_path": { "type": "string" }
-      }
-    },
-    "release_result": {
-      "type": "object",
-      "description": "Embedded release command result",
-      "properties": {
-        "release_url": { "type": "string", "format": "uri" },
-        "assets_uploaded": { "type": "integer" },
-        "draft": { "type": "boolean" },
-        "prerelease": { "type": "boolean" }
-      }
-    },
-    "total_duration_ms": {
-      "type": "integer",
-      "minimum": 0,
-      "description": "Total pipeline duration"
-    },
-    "stopped_at_stage": {
+    "build_manifest": {
       "type": "string",
-      "description": "Stage where pipeline stopped (if failed)"
+      "description": "Path to build manifest JSON"
     },
-    "resume_info": {
-      "type": "object",
-      "properties": {
-        "can_resume": { "type": "boolean" },
-        "resume_from": { "type": "string" },
-        "state_file": { "type": "string" }
-      },
-      "description": "Information for resuming failed pipeline"
+    "release_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "GitHub release URL"
     }
   },
   "$defs": {
-    "pipeline_stage": {
+    "fallback_step": {
       "type": "object",
-      "required": ["name", "status"],
+      "required": ["command", "status", "exit_code"],
       "properties": {
-        "name": {
+        "command": {
           "type": "string",
-          "enum": ["check", "build", "sign", "release", "notify"],
-          "description": "Stage name"
+          "enum": ["check", "build", "release"],
+          "description": "Step name"
         },
         "status": {
           "type": "string",
-          "enum": ["pending", "running", "success", "failed", "skipped"],
-          "description": "Stage execution status"
+          "enum": ["success", "partial", "error"],
+          "description": "Step status"
         },
-        "started_at": {
-          "type": "string",
-          "format": "date-time",
-          "description": "When stage started"
+        "exit_code": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Step exit code"
         },
-        "completed_at": {
+        "run_id": {
           "type": "string",
-          "format": "date-time",
-          "description": "When stage completed"
+          "format": "uuid",
+          "description": "Run identifier for this step"
         },
         "duration_ms": {
           "type": "integer",
           "minimum": 0,
-          "description": "Stage duration"
+          "description": "Duration of step"
         },
         "error": {
           "type": "string",
-          "description": "Error message if failed"
-        },
-        "output": {
-          "type": "object",
-          "description": "Stage-specific output data"
+          "description": "Error message if step failed"
         }
       }
     }
