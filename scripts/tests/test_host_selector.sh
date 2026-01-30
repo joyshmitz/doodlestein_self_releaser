@@ -1,12 +1,30 @@
 #!/usr/bin/env bash
 # test_host_selector.sh - Tests for src/host_selector.sh
 #
+# Real-behavior tests using actual yq. Skips if yq is missing.
+# Host health function is stubbed for test isolation (not to mock external deps).
+#
 # Run: ./scripts/tests/test_host_selector.sh
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# ============================================================================
+# Dependency Check (no-mocks compliance: skip if missing, don't fake)
+# ============================================================================
+if ! command -v yq &>/dev/null; then
+    echo "SKIP: yq is required for host_selector tests"
+    echo "  Install: brew install yq OR apt install yq OR snap install yq"
+    exit 0
+fi
+
+if ! command -v jq &>/dev/null; then
+    echo "SKIP: jq is required for host_selector tests"
+    echo "  Install: brew install jq OR apt install jq"
+    exit 0
+fi
 
 # Test counters
 TESTS_RUN=0
@@ -27,7 +45,7 @@ export DSR_STATE_DIR="$TEMP_DIR/state"
 export DSR_CONFIG_DIR="$TEMP_DIR/config"
 mkdir -p "$DSR_STATE_DIR" "$DSR_CONFIG_DIR"
 
-# Create mock hosts.yaml for testing
+# Create test hosts.yaml fixture (real YAML, parsed by real yq)
 cat > "$DSR_CONFIG_DIR/hosts.yaml" << 'YAML'
 schema_version: "1.0.0"
 
@@ -46,34 +64,13 @@ YAML
 
 export DSR_HOSTS_FILE="$DSR_CONFIG_DIR/hosts.yaml"
 
-# Stub yq to avoid external dependency and keep tests deterministic
-mkdir -p "$TEMP_DIR/bin"
-cat > "$TEMP_DIR/bin/yq" << 'YQ'
-#!/usr/bin/env bash
-# Minimal stub for host_selector tests
-if [[ "$1" == "-r" ]]; then
-  query="$2"
-  file="$3"
-else
-  query="$1"
-  file="$2"
-fi
+# NOTE: yq is now used directly via PATH - no stubbing
+# The test uses real yq against the YAML fixture above
 
-case "$query" in
-  ".hosts.alpha.concurrency // 2") echo "3" ;;
-  ".hosts.beta.concurrency // 2") echo "1" ;;
-  ".hosts.alpha.platform // \"\"") echo "linux/amd64" ;;
-  ".hosts.beta.platform // \"\"") echo "darwin/arm64" ;;
-  ".hosts.alpha.connection // \"ssh\"") echo "local" ;;
-  ".hosts.beta.connection // \"ssh\"") echo "ssh" ;;
-  ".hosts | keys | .[]") echo "alpha"; echo "beta" ;;
-  *) echo "" ;;
-esac
-YQ
-chmod +x "$TEMP_DIR/bin/yq"
-export PATH="$TEMP_DIR/bin:$PATH"
-
-# Stub host_health_get_healthy_hosts for deterministic candidates
+# Stub host_health_get_healthy_hosts for TEST ISOLATION
+# This is NOT to avoid an external dependency - host_health is an internal module.
+# We stub it here to test host_selector.sh in isolation without coupling to host_health.sh.
+# This is standard unit test practice: isolate the unit under test.
 # shellcheck disable=SC2317
 host_health_get_healthy_hosts() {
   local capability=""

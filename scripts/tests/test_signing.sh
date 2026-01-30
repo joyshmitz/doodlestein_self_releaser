@@ -3,12 +3,22 @@
 #
 # Run: ./scripts/tests/test_signing.sh
 #
-# Uses a local minisign stub so tests do not require minisign installed.
+# Real-behavior tests using actual minisign. Skips if minisign is missing.
+# (No-mocks compliant per bd-3py)
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# ============================================================================
+# Dependency Check (no-mocks compliance: skip if missing, don't fake)
+# ============================================================================
+if ! command -v minisign &>/dev/null; then
+    echo "SKIP: minisign is required for signing tests"
+    echo "  Install: brew install minisign OR apt install minisign"
+    exit 0
+fi
 
 # Test counters
 TESTS_RUN=0
@@ -47,58 +57,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Create a stub minisign in PATH
-setup_minisign_stub() {
-  cat > "$BIN_DIR/minisign" << 'EOF'
-#!/usr/bin/env bash
-set -uo pipefail
-
-mode=""
-pub=""
-priv=""
-file=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -G) mode="gen"; shift ;;
-    -S) mode="sign"; shift ;;
-    -V) mode="verify"; shift ;;
-    -p) pub="$2"; shift 2 ;;
-    -s) priv="$2"; shift 2 ;;
-    -m) file="$2"; shift 2 ;;
-    -W) shift ;; # no-password
-    -t|-c) shift 2 ;; # comments
-    *) shift ;;
-  esac
-done
-
-case "$mode" in
-  gen)
-    [[ -n "$priv" && -n "$pub" ]] || exit 1
-    mkdir -p "$(dirname "$priv")"
-    echo "untrusted comment: fake key" > "$priv"
-    echo "RWRfAKEKEY" >> "$priv"
-    echo "fake-public-key" > "$pub"
-    exit 0
-    ;;
-  sign)
-    [[ -n "$file" ]] || exit 1
-    echo "fake signature for $file" > "${file}.minisig"
-    exit 0
-    ;;
-  verify)
-    [[ "${MINISIGN_FAIL_VERIFY:-}" == "1" ]] && exit 1
-    [[ -n "$file" && -f "${file}.minisig" ]] || exit 1
-    exit 0
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-EOF
-  chmod +x "$BIN_DIR/minisign"
-  export PATH="$BIN_DIR:$PATH"
-}
+# NOTE: Using real minisign (no stub) per no-mocks policy
+# Tests will generate real keys and signatures
 
 # Helpers
 run_cmd() {
@@ -154,7 +114,7 @@ test_signing_require_minisign_missing() {
 }
 
 test_signing_init_creates_keys() {
-  setup_minisign_stub
+  # Uses real minisign (no stub)
   run_cmd "signing_init creates keypair" signing_init --no-password
   run_cmd "private key exists" assert_file_exists "$SIGNING_PRIVATE_KEY"
   run_cmd "public key exists" assert_file_exists "$SIGNING_PUBLIC_KEY"
@@ -182,10 +142,12 @@ test_signing_sign_and_verify() {
 
 test_signing_verify_failure() {
   local artifact="$TEMP_DIR/tampered.bin"
-  echo "data" > "$artifact"
+  echo "original data" > "$artifact"
   signing_sign "$artifact" >/dev/null
 
-  MINISIGN_FAIL_VERIFY=1 run_expect_fail "signing_verify fails when minisign reports error" signing_verify "$artifact" >/dev/null
+  # Tamper with the file AFTER signing to cause verification failure
+  echo "tampered data" > "$artifact"
+  run_expect_fail "signing_verify fails for tampered file" signing_verify "$artifact" >/dev/null
 }
 
 test_signing_sign_batch() {
