@@ -48,6 +48,7 @@ source "$SCRIPT_DIR/src/host_selector.sh"
 source "$SCRIPT_DIR/src/quality_gates.sh"
 source "$SCRIPT_DIR/src/build_state.sh"
 source "$SCRIPT_DIR/src/git_ops.sh"
+source "$SCRIPT_DIR/src/version.sh"
 
 # Global flags
 JSON_MODE=false
@@ -85,6 +86,7 @@ COMMANDS:
     doctor      System diagnostics
     signing     Manage minisign keys and signing
     status      System and last run summary
+    version     Detect and tag versions from version files
 
 GLOBAL OPTIONS:
     -j, --json          Machine-readable JSON output
@@ -2779,6 +2781,174 @@ EOF
 }
 
 # ============================================================================
+# VERSION SUBCOMMAND
+# ============================================================================
+
+cmd_version() {
+    local subcmd="${1:-detect}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        detect)
+            # dsr version detect <tool|path>
+            local target="${1:-}"
+            local repo_path=""
+
+            if [[ -z "$target" ]]; then
+                log_error "Usage: dsr version detect <tool|path>"
+                return 4
+            fi
+
+            # Resolve target to repo path
+            if [[ -d "$target" ]]; then
+                repo_path="$target"
+            else
+                # Try to find tool in repos.d
+                local config_file="${DSR_CONFIG_DIR:-$HOME/.config/dsr}/repos.d/${target}.yaml"
+                if [[ -f "$config_file" ]] && command -v yq &>/dev/null; then
+                    repo_path=$(yq -r '.local_path // ""' "$config_file" 2>/dev/null)
+                fi
+            fi
+
+            if [[ -z "$repo_path" || ! -d "$repo_path" ]]; then
+                log_error "Cannot resolve target to repository: $target"
+                return 4
+            fi
+
+            if $JSON_MODE; then
+                local json_result
+                json_result=$(version_info_json "$repo_path")
+                json_envelope "version detect" "success" 0 "$json_result"
+            else
+                local version
+                if version=$(version_detect "$repo_path"); then
+                    log_ok "Version: $version (v$version)"
+                    if version_needs_tag "$repo_path"; then
+                        log_info "Tag v$version does not exist (create with: dsr version tag $target)"
+                    else
+                        log_info "Tag v$version already exists"
+                    fi
+                else
+                    log_error "No version file found in $repo_path"
+                    return 1
+                fi
+            fi
+            ;;
+
+        tag)
+            # dsr version tag <tool|path> [--push] [--all]
+            local target="${1:-}"
+            local push=false
+            local tag_all=false
+
+            # Parse options
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --push) push=true; shift ;;
+                    --all) tag_all=true; shift ;;
+                    --dry-run|-n) shift ;;  # Already handled by global DRY_RUN
+                    -*) shift ;;
+                    *)
+                        if [[ -z "$target" || "$target" == --* ]]; then
+                            target="$1"
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+
+            if $tag_all; then
+                # Tag all configured tools
+                local args=""
+                $push && args+=" --push"
+                $DRY_RUN && args+=" --dry-run"
+                $JSON_MODE && args+=" --json"
+                # shellcheck disable=SC2086
+                version_tag_all $args
+                return $?
+            fi
+
+            if [[ -z "$target" ]]; then
+                log_error "Usage: dsr version tag <tool|path> [--push]"
+                log_error "       dsr version tag --all [--push]"
+                return 4
+            fi
+
+            # Resolve target to repo path
+            local repo_path=""
+            if [[ -d "$target" ]]; then
+                repo_path="$target"
+            else
+                local config_file="${DSR_CONFIG_DIR:-$HOME/.config/dsr}/repos.d/${target}.yaml"
+                if [[ -f "$config_file" ]] && command -v yq &>/dev/null; then
+                    repo_path=$(yq -r '.local_path // ""' "$config_file" 2>/dev/null)
+                fi
+            fi
+
+            if [[ -z "$repo_path" || ! -d "$repo_path" ]]; then
+                log_error "Cannot resolve target to repository: $target"
+                return 4
+            fi
+
+            local tag_args=""
+            $push && tag_args+=" --push"
+            $DRY_RUN && tag_args+=" --dry-run"
+
+            # shellcheck disable=SC2086
+            if version_create_tag "$repo_path" $tag_args; then
+                if $JSON_MODE; then
+                    local json_result
+                    json_result=$(version_info_json "$repo_path")
+                    json_envelope "version tag" "success" 0 "$json_result"
+                fi
+                return 0
+            else
+                return 1
+            fi
+            ;;
+
+        --help|-h|help)
+            cat << 'EOF'
+dsr version - Detect and tag versions from version files
+
+USAGE:
+    dsr version <subcommand> [options]
+
+SUBCOMMANDS:
+    detect <tool|path>      Show version from version files
+    tag <tool|path>         Create git tag for detected version
+    tag --all               Tag all configured tools with new versions
+
+OPTIONS:
+    --push          Push tags to remote after creation
+    --dry-run       Show planned actions without executing
+
+VERSION SOURCES:
+    Rust        Cargo.toml       version = "X.Y.Z"
+    Go          VERSION, *.go    Version = "X.Y.Z"
+    Node/Bun    package.json     "version": "X.Y.Z"
+    Python      pyproject.toml   version = "X.Y.Z"
+
+EXAMPLES:
+    dsr version detect ntm          Show version for ntm tool
+    dsr version detect /path/to/repo
+    dsr version tag ntm --push      Create and push tag
+    dsr version tag --all           Tag all tools needing tags
+    dsr version tag --all --push    Tag and push all
+
+For more information, see docs/CLI_CONTRACT.md
+EOF
+            ;;
+
+        *)
+            log_error "Unknown version subcommand: $subcmd"
+            log_info "Run 'dsr version --help' for usage"
+            return 4
+            ;;
+    esac
+}
+
+# ============================================================================
 # SIGNING SUBCOMMAND
 # ============================================================================
 
@@ -2946,6 +3116,9 @@ main() {
             ;;
         status)
             cmd_status "$@"
+            ;;
+        version)
+            cmd_version "$@"
             ;;
         help)
             show_help
