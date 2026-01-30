@@ -1,0 +1,538 @@
+#!/usr/bin/env bash
+# dsr - Doodlestein Self-Releaser
+#
+# Fallback release infrastructure for when GitHub Actions is throttled.
+#
+# Usage:
+#   dsr <command> [options]
+#
+# Commands:
+#   check     Detect throttled GitHub Actions runs
+#   watch     Continuous monitoring daemon
+#   build     Build artifacts locally
+#   release   Upload artifacts to GitHub
+#   fallback  Full pipeline: check -> build -> release
+#   repos     Manage repository registry
+#   config    View/modify configuration
+#   doctor    System diagnostics
+#
+# Global Options:
+#   --json, -j          Machine-readable JSON output
+#   --non-interactive   Disable prompts (CI mode)
+#   --dry-run, -n       Show planned actions without executing
+#   --verbose, -v       Enable verbose logging
+#   --quiet, -q         Suppress non-error output
+#   --help, -h          Show help
+#   --version           Show version
+
+set -uo pipefail
+
+# Version
+DSR_VERSION="0.1.0"
+
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source modules
+source "$SCRIPT_DIR/src/config.sh"
+
+# Global flags
+JSON_MODE=false
+DRY_RUN=false
+VERBOSE=false
+QUIET=false
+NON_INTERACTIVE=false
+
+# Colors (unless disabled)
+if [[ -z "${NO_COLOR:-}" && -t 2 ]]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[0;33m'
+    BLUE=$'\033[0;34m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' NC=''
+fi
+
+log_info()  { $QUIET || echo "${BLUE}[dsr]${NC} $*" >&2; }
+log_ok()    { $QUIET || echo "${GREEN}[dsr]${NC} $*" >&2; }
+log_warn()  { echo "${YELLOW}[dsr]${NC} $*" >&2; }
+log_error() { echo "${RED}[dsr]${NC} $*" >&2; }
+log_debug() { $VERBOSE && echo "${BLUE}[debug]${NC} $*" >&2; }
+
+# Show help
+show_help() {
+    cat << 'EOF'
+dsr - Doodlestein Self-Releaser
+
+Fallback release infrastructure for when GitHub Actions is throttled.
+
+USAGE:
+    dsr <command> [options]
+
+COMMANDS:
+    check       Detect throttled GitHub Actions runs
+    watch       Continuous monitoring daemon
+    build       Build artifacts locally
+    release     Upload artifacts to GitHub
+    fallback    Full pipeline: check -> build -> release
+    repos       Manage repository registry
+    config      View/modify configuration
+    doctor      System diagnostics
+
+GLOBAL OPTIONS:
+    -j, --json          Machine-readable JSON output
+    -y, --non-interactive   Disable prompts (CI mode)
+    -n, --dry-run       Show planned actions without executing
+    -v, --verbose       Enable verbose logging
+    -q, --quiet         Suppress non-error output
+    -h, --help          Show this help
+        --version       Show version
+
+EXAMPLES:
+    dsr config init              Initialize configuration
+    dsr config show              Show current configuration
+    dsr check --repos ntm,bv     Check if repos are throttled
+    dsr build --repo ntm         Build ntm locally
+    dsr doctor                   Check system dependencies
+
+For more information, see docs/CLI_CONTRACT.md
+EOF
+}
+
+# Show version
+show_version() {
+    if $JSON_MODE; then
+        echo "{\"tool\": \"dsr\", \"version\": \"$DSR_VERSION\"}"
+    else
+        echo "dsr version $DSR_VERSION"
+    fi
+}
+
+# JSON envelope helper
+# Usage: json_envelope <command> <status> <exit_code> [details_json]
+json_envelope() {
+    local cmd="$1"
+    local status="$2"
+    local exit_code="$3"
+    local details="${4:-{}}"
+    local run_id
+    run_id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "unknown")
+    local started_at
+    started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    cat << EOF
+{
+  "command": "$cmd",
+  "status": "$status",
+  "exit_code": $exit_code,
+  "run_id": "$run_id",
+  "started_at": "$started_at",
+  "duration_ms": 0,
+  "tool": "dsr",
+  "version": "$DSR_VERSION",
+  "details": $details
+}
+EOF
+}
+
+# ============================================================================
+# CONFIG SUBCOMMAND
+# ============================================================================
+
+cmd_config() {
+    local subcmd="${1:-show}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        init)
+            cmd_config_init "$@"
+            ;;
+        show)
+            cmd_config_show "$@"
+            ;;
+        get)
+            cmd_config_get "$@"
+            ;;
+        set)
+            cmd_config_set "$@"
+            ;;
+        validate)
+            cmd_config_validate "$@"
+            ;;
+        edit)
+            cmd_config_edit "$@"
+            ;;
+        --help|-h|help)
+            cat << 'EOF'
+dsr config - View and modify configuration
+
+USAGE:
+    dsr config <subcommand> [options]
+
+SUBCOMMANDS:
+    init        Initialize configuration directories and files
+    show        Show current configuration
+    get <key>   Get a specific config value
+    set <k>=<v> Set a config value
+    validate    Validate configuration files
+    edit        Open config in $EDITOR
+
+OPTIONS:
+    --json      Output in JSON format
+    --force     Overwrite existing files (init only)
+
+EXAMPLES:
+    dsr config init              Create default config files
+    dsr config show              Show all configuration
+    dsr config get threshold_seconds
+    dsr config set log_level=debug
+    dsr config validate
+EOF
+            ;;
+        *)
+            log_error "Unknown config subcommand: $subcmd"
+            log_info "Run 'dsr config --help' for usage"
+            return 4
+            ;;
+    esac
+}
+
+cmd_config_init() {
+    local force=false
+    [[ "${1:-}" == "--force" ]] && force=true
+
+    if $JSON_MODE; then
+        config_init ${force:+--force} >/dev/null 2>&1
+        local status=$?
+        if [[ $status -eq 0 ]]; then
+            json_envelope "config init" "success" 0 "{\"config_dir\": \"$DSR_CONFIG_DIR\", \"initialized\": true}"
+        else
+            json_envelope "config init" "error" $status "{\"error\": \"initialization failed\"}"
+        fi
+        return $status
+    else
+        if $force; then
+            config_init --force
+        else
+            config_init
+        fi
+    fi
+}
+
+cmd_config_show() {
+    if $JSON_MODE; then
+        config_show --json
+    else
+        config_show "$@"
+    fi
+}
+
+cmd_config_get() {
+    local key="${1:-}"
+    if [[ -z "$key" ]]; then
+        log_error "Usage: dsr config get <key>"
+        return 4
+    fi
+
+    config_load
+    local value
+    value=$(config_get "$key" "")
+
+    if [[ -z "$value" ]]; then
+        log_error "Key not found: $key"
+        return 4
+    fi
+
+    if $JSON_MODE; then
+        echo "{\"key\": \"$key\", \"value\": \"$value\"}"
+    else
+        echo "$value"
+    fi
+}
+
+cmd_config_set() {
+    local input="${1:-}"
+    if [[ -z "$input" || ! "$input" =~ = ]]; then
+        log_error "Usage: dsr config set KEY=VALUE"
+        return 4
+    fi
+
+    local key="${input%%=*}"
+    local value="${input#*=}"
+
+    config_load
+    config_set "$key" "$value" --persist
+
+    if $JSON_MODE; then
+        echo "{\"key\": \"$key\", \"value\": \"$value\", \"persisted\": true}"
+    fi
+}
+
+cmd_config_validate() {
+    if $JSON_MODE; then
+        config_load
+        if config_validate 2>/dev/null; then
+            json_envelope "config validate" "success" 0 "{\"valid\": true}"
+        else
+            json_envelope "config validate" "error" 4 "{\"valid\": false}"
+            return 4
+        fi
+    else
+        config_load
+        config_validate
+    fi
+}
+
+cmd_config_edit() {
+    local editor="${EDITOR:-vi}"
+    if [[ ! -f "$DSR_CONFIG_FILE" ]]; then
+        log_error "Config file not found. Run: dsr config init"
+        return 4
+    fi
+    exec "$editor" "$DSR_CONFIG_FILE"
+}
+
+# ============================================================================
+# DOCTOR SUBCOMMAND (stub)
+# ============================================================================
+
+cmd_doctor() {
+    log_info "Running system diagnostics..."
+
+    local errors=0
+    local warnings=0
+    local checks=()
+
+    # Check git
+    if command -v git &>/dev/null; then
+        checks+=("{\"name\": \"git\", \"status\": \"ok\", \"version\": \"$(git --version | cut -d' ' -f3)\"}")
+        log_ok "git: $(git --version | cut -d' ' -f3)"
+    else
+        checks+=("{\"name\": \"git\", \"status\": \"error\", \"message\": \"not found\"}")
+        log_error "git: not found"
+        ((errors++))
+    fi
+
+    # Check gh
+    if command -v gh &>/dev/null; then
+        if gh auth status &>/dev/null 2>&1; then
+            checks+=("{\"name\": \"gh\", \"status\": \"ok\", \"authenticated\": true}")
+            log_ok "gh: authenticated"
+        else
+            checks+=("{\"name\": \"gh\", \"status\": \"warning\", \"authenticated\": false}")
+            log_warn "gh: not authenticated (run: gh auth login)"
+            ((warnings++))
+        fi
+    else
+        checks+=("{\"name\": \"gh\", \"status\": \"error\", \"message\": \"not found\"}")
+        log_error "gh: not found"
+        ((errors++))
+    fi
+
+    # Check docker
+    if command -v docker &>/dev/null; then
+        if docker info &>/dev/null 2>&1; then
+            checks+=("{\"name\": \"docker\", \"status\": \"ok\", \"running\": true}")
+            log_ok "docker: running"
+        else
+            checks+=("{\"name\": \"docker\", \"status\": \"warning\", \"running\": false}")
+            log_warn "docker: not running"
+            ((warnings++))
+        fi
+    else
+        checks+=("{\"name\": \"docker\", \"status\": \"warning\", \"message\": \"not found\"}")
+        log_warn "docker: not found (needed for act)"
+        ((warnings++))
+    fi
+
+    # Check act
+    if command -v act &>/dev/null; then
+        checks+=("{\"name\": \"act\", \"status\": \"ok\", \"version\": \"$(act --version 2>/dev/null | head -1)\"}")
+        log_ok "act: $(act --version 2>/dev/null | head -1)"
+    else
+        checks+=("{\"name\": \"act\", \"status\": \"warning\", \"message\": \"not found\"}")
+        log_warn "act: not found (needed for local builds)"
+        ((warnings++))
+    fi
+
+    # Check SSH to build hosts
+    for host in mmini wlap; do
+        if timeout 5 ssh -o ConnectTimeout=3 "$host" "echo ok" &>/dev/null 2>&1; then
+            checks+=("{\"name\": \"ssh-$host\", \"status\": \"ok\"}")
+            log_ok "ssh $host: reachable"
+        else
+            checks+=("{\"name\": \"ssh-$host\", \"status\": \"warning\", \"message\": \"unreachable\"}")
+            log_warn "ssh $host: unreachable"
+            ((warnings++))
+        fi
+    done
+
+    # Check config
+    if config_validate &>/dev/null 2>&1; then
+        checks+=("{\"name\": \"config\", \"status\": \"ok\"}")
+        log_ok "config: valid"
+    else
+        checks+=("{\"name\": \"config\", \"status\": \"warning\", \"message\": \"invalid or missing\"}")
+        log_warn "config: invalid or missing (run: dsr config init)"
+        ((warnings++))
+    fi
+
+    # Summary
+    echo ""
+    if [[ $errors -gt 0 ]]; then
+        log_error "Found $errors error(s), $warnings warning(s)"
+        local exit_code=3
+    elif [[ $warnings -gt 0 ]]; then
+        log_warn "Found $warnings warning(s)"
+        local exit_code=0
+    else
+        log_ok "All checks passed"
+        local exit_code=0
+    fi
+
+    if $JSON_MODE; then
+        local checks_json
+        checks_json=$(printf '%s\n' "${checks[@]}" | jq -s '.')
+        json_envelope "doctor" "$([ $errors -eq 0 ] && echo success || echo error)" $exit_code \
+            "{\"errors\": $errors, \"warnings\": $warnings, \"checks\": $checks_json}"
+    fi
+
+    return $exit_code
+}
+
+# ============================================================================
+# STUB COMMANDS (to be implemented)
+# ============================================================================
+
+cmd_check() {
+    log_warn "check command not yet implemented"
+    log_info "See bead bd-1jt.1.1 for implementation plan"
+    return 4
+}
+
+cmd_watch() {
+    log_warn "watch command not yet implemented"
+    log_info "See bead bd-1jt.1.2 for implementation plan"
+    return 4
+}
+
+cmd_build() {
+    log_warn "build command not yet implemented"
+    log_info "See bead bd-1jt.2.1 for implementation plan"
+    return 4
+}
+
+cmd_release() {
+    log_warn "release command not yet implemented"
+    log_info "See bead bd-1jt.3.1 for implementation plan"
+    return 4
+}
+
+cmd_fallback() {
+    log_warn "fallback command not yet implemented"
+    log_info "See bead bd-1jt.1.4 for implementation plan"
+    return 4
+}
+
+cmd_repos() {
+    log_warn "repos command not yet implemented"
+    log_info "See bead bd-1jt.1.3 for implementation plan"
+    return 4
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+main() {
+    # Parse global options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json|-j)
+                JSON_MODE=true
+                shift
+                ;;
+            --dry-run|-n)
+                DRY_RUN=true
+                shift
+                ;;
+            --verbose|-v)
+                VERBOSE=true
+                shift
+                ;;
+            --quiet|-q)
+                QUIET=true
+                shift
+                ;;
+            --non-interactive|-y)
+                NON_INTERACTIVE=true
+                shift
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --version)
+                show_version
+                exit 0
+                ;;
+            -*)
+                # Unknown option - might be command-specific
+                break
+                ;;
+            *)
+                # Not an option - must be command
+                break
+                ;;
+        esac
+    done
+
+    # Get command
+    local command="${1:-}"
+    shift 2>/dev/null || true
+
+    if [[ -z "$command" ]]; then
+        show_help
+        exit 0
+    fi
+
+    # Dispatch to command handler
+    case "$command" in
+        config)
+            cmd_config "$@"
+            ;;
+        doctor)
+            cmd_doctor "$@"
+            ;;
+        check)
+            cmd_check "$@"
+            ;;
+        watch)
+            cmd_watch "$@"
+            ;;
+        build)
+            cmd_build "$@"
+            ;;
+        release)
+            cmd_release "$@"
+            ;;
+        fallback)
+            cmd_fallback "$@"
+            ;;
+        repos)
+            cmd_repos "$@"
+            ;;
+        help)
+            show_help
+            exit 0
+            ;;
+        *)
+            log_error "Unknown command: $command"
+            log_info "Run 'dsr --help' for usage"
+            exit 4
+            ;;
+    esac
+}
+
+main "$@"
