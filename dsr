@@ -42,6 +42,7 @@ source "$SCRIPT_DIR/src/config.sh"
 source "$SCRIPT_DIR/src/signing.sh"
 source "$SCRIPT_DIR/src/github.sh"
 source "$SCRIPT_DIR/src/host_health.sh"
+source "$SCRIPT_DIR/src/quality_gates.sh"
 
 # Global flags
 JSON_MODE=false
@@ -71,6 +72,7 @@ COMMANDS:
     build       Build artifacts locally
     release     Upload artifacts to GitHub
     fallback    Full pipeline: check -> build -> release
+    quality     Run pre-release quality checks
     repos       Manage repository registry
     health      Check health of build hosts
     prune       Clean up old artifacts and cache
@@ -1318,6 +1320,107 @@ cmd_build() {
     log_warn "build command not yet implemented"
     log_info "See bead bd-1jt.2.1 for implementation plan"
     return 4
+}
+
+# Quality gates command - run pre-release checks
+cmd_quality() {
+    local tool_name=""
+    local dry_run=false
+    local skip_checks=false
+    local work_dir=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tool|-t)
+                tool_name="$2"
+                shift 2
+                ;;
+            --dry-run|-n)
+                dry_run=true
+                shift
+                ;;
+            --skip-checks)
+                skip_checks=true
+                shift
+                ;;
+            --work-dir|-w)
+                work_dir="$2"
+                shift 2
+                ;;
+            --help|-h)
+                cat << 'EOF'
+dsr quality - Run pre-release quality checks
+
+USAGE:
+    dsr quality --tool <name> [options]
+
+OPTIONS:
+    -t, --tool <name>    Tool to check (required)
+    -n, --dry-run        Show checks without running them
+    --skip-checks        Skip all checks (for testing)
+    -w, --work-dir       Directory to run checks in
+
+DESCRIPTION:
+    Runs quality gate checks configured in repos.yaml for the specified tool.
+    Checks are commands like 'cargo test', 'go vet', etc.
+
+CONFIGURATION:
+    Configure checks in ~/.config/dsr/repos.yaml:
+
+    tools:
+      ntm:
+        checks:
+          - "cargo clippy --all-targets -- -D warnings"
+          - "cargo test"
+          - "cargo fmt --check"
+
+EXAMPLES:
+    dsr quality --tool ntm             Run checks for ntm
+    dsr quality --tool ntm --dry-run   Show what would run
+    dsr quality --tool bv -w /path/to/bv
+
+EXIT CODES:
+    0  - All checks passed
+    1  - One or more checks failed
+    4  - Invalid arguments
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$tool_name" ]]; then
+                    tool_name="$1"
+                else
+                    log_error "Unknown argument: $1"
+                    return 4
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$tool_name" ]]; then
+        log_error "Tool name required. Use --tool <name> or provide as first argument."
+        log_info "Run 'dsr quality --help' for usage"
+        return 4
+    fi
+
+    # Build qg_run_checks arguments
+    local qg_args=("$tool_name")
+    $dry_run && qg_args+=("--dry-run")
+    $skip_checks && qg_args+=("--skip-checks")
+    [[ -n "$work_dir" ]] && qg_args+=("--work-dir" "$work_dir")
+
+    # Run quality checks
+    local result exit_code=0
+    result=$(qg_run_checks "${qg_args[@]}") || exit_code=$?
+
+    # Output
+    if $JSON_MODE; then
+        json_envelope "quality" "$([ $exit_code -eq 0 ] && echo success || echo failure)" "$exit_code" "$result"
+    fi
+
+    return $exit_code
 }
 
 cmd_release() {
@@ -2787,6 +2890,9 @@ main() {
             ;;
         fallback)
             cmd_fallback "$@"
+            ;;
+        quality)
+            cmd_quality "$@"
             ;;
         repos)
             cmd_repos "$@"
