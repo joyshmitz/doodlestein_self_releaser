@@ -738,10 +738,13 @@ build_retry_with_backoff() {
   local exit_code=0
 
   while [[ $attempt -lt $max_retries ]]; do
-    if "$@"; then
+    # Run command and capture exit code using || (if uses $? incorrectly)
+    exit_code=0
+    "$@" || exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
       return 0
     fi
-    exit_code=$?
 
     attempt=$((attempt + 1))
     if [[ $attempt -ge $max_retries ]]; then

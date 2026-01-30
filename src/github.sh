@@ -466,20 +466,28 @@ gh_upload_asset() {
     upload_url="${upload_url%\{*}"
     upload_url+="?name=$filename"
 
-    if gh_check 2>/dev/null; then
-        gh release upload --clobber -R "$(echo "$upload_url" | sed 's|.*/repos/||; s|/releases/.*||')" \
-            "$(echo "$upload_url" | sed -n 's|.*tag/\([^/]*\).*|\1|p')" \
-            "$file_path" 2>/dev/null
-    else
-        gh_check_token || return 3
-        curl -s \
-            -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Content-Type: $content_type" \
-            --data-binary "@$file_path" \
-            "$upload_url"
+    local token=""
+    if command -v secrets_get_gh_token &>/dev/null; then
+        token=$(secrets_get_gh_token 2>/dev/null || true)
     fi
+    if [[ -z "$token" ]] && gh_check 2>/dev/null; then
+        token=$(gh auth token 2>/dev/null || true)
+    fi
+    [[ -z "$token" ]] && token="${GITHUB_TOKEN:-}"
+
+    if [[ -z "$token" ]]; then
+        _gh_log_error "No GitHub token available for asset upload"
+        _gh_log_error "Run: gh auth login  OR  export GITHUB_TOKEN=..."
+        return 3
+    fi
+
+    curl -sS -f \
+        -X POST \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: $content_type" \
+        --data-binary "@$file_path" \
+        "$upload_url"
 }
 
 # Compare two commits/tags
