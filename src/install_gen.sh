@@ -66,12 +66,16 @@ _install_gen_template() {
 #   --verify                 Verify checksum + minisign signature
 #   --json                   Output JSON for automation
 #   --non-interactive        No prompts, fail on missing consent
+#   --cache-dir DIR          Cache directory (default: ~/.cache/dsr/installers)
+#   --offline                Use cached archives only (fail if not cached)
+#   --prefer-gh              Prefer gh release download for private repos
 #   --help                   Show this help
 #
 # Safety:
 #   - Never overwrites without asking (unless --yes)
 #   - Verifies checksums by default
 #   - Supports offline installation from cached archives
+#   - Caches downloads for future offline use
 
 set -uo pipefail
 
@@ -98,6 +102,9 @@ _REQUIRE_SIGNATURES=false
 _NON_INTERACTIVE=false
 _AUTO_YES=false
 _OFFLINE_ARCHIVE=""
+_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dsr/installers"
+_OFFLINE_MODE=false
+_PREFER_GH=false
 
 # Colors (disable if NO_COLOR set or not a terminal)
 if [[ -z "${NO_COLOR:-}" && -t 2 ]]; then
@@ -172,6 +179,106 @@ _get_archive_format() {
     esac
 }
 
+# ============================================================================
+# CACHE FUNCTIONS
+# ============================================================================
+
+# Get cache path for a specific version/platform
+_cache_path() {
+    local version="$1"
+    local platform="$2"
+    local format="$3"
+    local os="${platform%/*}"
+    local arch="${platform#*/}"
+    echo "${_CACHE_DIR}/${TOOL_NAME}/${version}/${os}-${arch}.${format}"
+}
+
+# Check if cached archive exists
+_cache_get() {
+    local version="$1"
+    local platform="$2"
+    local format="$3"
+    local cache_file
+    cache_file=$(_cache_path "$version" "$platform" "$format")
+
+    if [[ -f "$cache_file" ]]; then
+        _log_info "Using cached archive: $cache_file"
+        echo "$cache_file"
+        return 0
+    fi
+    return 1
+}
+
+# Save archive to cache
+_cache_put() {
+    local src_file="$1"
+    local version="$2"
+    local platform="$3"
+    local format="$4"
+    local cache_file
+    cache_file=$(_cache_path "$version" "$platform" "$format")
+    local cache_dir
+    cache_dir=$(dirname "$cache_file")
+
+    mkdir -p "$cache_dir"
+    cp "$src_file" "$cache_file"
+    _log_info "Cached archive: $cache_file"
+}
+
+# ============================================================================
+# GH CLI DOWNLOAD
+# ============================================================================
+
+# Download release asset using gh CLI (supports private repos)
+_gh_download() {
+    local version="$1"
+    local platform="$2"
+    local format="$3"
+    local dest="$4"
+
+    if ! command -v gh &>/dev/null; then
+        return 1
+    fi
+
+    # Check gh auth status
+    if ! gh auth status &>/dev/null; then
+        _log_warn "gh not authenticated - falling back to curl"
+        return 1
+    fi
+
+    local os="${platform%/*}"
+    local arch="${platform#*/}"
+    local version_num="${version#v}"
+
+    # Construct asset name from pattern
+    local artifact_name="$ARTIFACT_NAMING"
+    artifact_name="${artifact_name//\$\{name\}/$TOOL_NAME}"
+    artifact_name="${artifact_name//\$\{binary\}/$BINARY_NAME}"
+    artifact_name="${artifact_name//\$\{version\}/$version_num}"
+    artifact_name="${artifact_name//\$\{os\}/$os}"
+    artifact_name="${artifact_name//\$\{arch\}/$arch}"
+    artifact_name="${artifact_name//\$\{ext\}/$format}"
+    local asset_name="${artifact_name}.${format}"
+
+    _log_info "Downloading via gh release download: $asset_name"
+
+    local dest_dir
+    dest_dir=$(dirname "$dest")
+
+    if gh release download "$version" --repo "$REPO" --pattern "$asset_name" --dir "$dest_dir" 2>/dev/null; then
+        # gh downloads with the original filename, move to our destination
+        local downloaded_file="$dest_dir/$asset_name"
+        if [[ -f "$downloaded_file" && "$downloaded_file" != "$dest" ]]; then
+            mv "$downloaded_file" "$dest"
+        fi
+        _log_ok "Downloaded via gh CLI"
+        return 0
+    else
+        _log_warn "gh release download failed - falling back to curl"
+        return 1
+    fi
+}
+
 # Get latest version from GitHub
 _get_latest_version() {
     local api_url="https://api.github.com/repos/$REPO/releases/latest"
@@ -187,11 +294,12 @@ _get_latest_version() {
         return 1
     }
 
-    # Extract tag_name from JSON (works with jq or grep)
+    # Extract tag_name from JSON (works with jq or POSIX tools)
     if command -v jq &>/dev/null; then
         echo "$response" | jq -r '.tag_name'
     else
-        echo "$response" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1
+        # Avoid non-portable grep -P (not available on macOS/BSD)
+        echo "$response" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
     fi
 }
 
@@ -208,9 +316,11 @@ _get_download_url() {
     # Apply artifact naming pattern
     local artifact_name="$ARTIFACT_NAMING"
     artifact_name="${artifact_name//\$\{name\}/$TOOL_NAME}"
+    artifact_name="${artifact_name//\$\{binary\}/$BINARY_NAME}"
     artifact_name="${artifact_name//\$\{version\}/$version_num}"
     artifact_name="${artifact_name//\$\{os\}/$os}"
     artifact_name="${artifact_name//\$\{arch\}/$arch}"
+    artifact_name="${artifact_name//\$\{ext\}/$format}"
 
     echo "https://github.com/$REPO/releases/download/$version/${artifact_name}.${format}"
 }
@@ -231,7 +341,10 @@ _download_and_verify() {
     # Verify checksum if available
     if [[ -n "$checksums_url" ]]; then
         local checksums
-        checksums=$(curl -sSfL "$checksums_url" 2>/dev/null)
+        if ! checksums=$(curl -sSfL "$checksums_url" 2>/dev/null); then
+            _log_error "Failed to download checksums"
+            return 1
+        fi
 
         if [[ -n "$checksums" ]]; then
             local expected_sha
@@ -428,8 +541,23 @@ main() {
                 shift
                 ;;
             --offline)
-                _OFFLINE_ARCHIVE="$2"
+                # --offline alone means cache-only mode
+                # --offline <path> means use explicit archive
+                if [[ "${2:-}" =~ ^- ]] || [[ -z "${2:-}" ]]; then
+                    _OFFLINE_MODE=true
+                    shift
+                else
+                    _OFFLINE_ARCHIVE="$2"
+                    shift 2
+                fi
+                ;;
+            --cache-dir)
+                _CACHE_DIR="$2"
                 shift 2
+                ;;
+            --prefer-gh)
+                _PREFER_GH=true
+                shift
                 ;;
             --help|-h)
                 grep '^#' "$0" | grep -v '^#!/' | sed 's/^# //' | sed 's/^#//'
@@ -467,7 +595,9 @@ main() {
     local extract_dir="$temp_dir/extracted"
 
     # Download or use offline archive
+    local from_cache=false
     if [[ -n "$_OFFLINE_ARCHIVE" ]]; then
+        # Explicit offline archive path
         if [[ ! -f "$_OFFLINE_ARCHIVE" ]]; then
             _log_error "Offline archive not found: $_OFFLINE_ARCHIVE"
             return 1
@@ -475,18 +605,60 @@ main() {
         cp "$_OFFLINE_ARCHIVE" "$archive_file"
         _log_info "Using offline archive: $_OFFLINE_ARCHIVE"
     else
-        local download_url
-        download_url=$(_get_download_url "$_VERSION" "$platform" "$format")
+        # Check cache first
+        local cached_file
+        if cached_file=$(_cache_get "$_VERSION" "$platform" "$format"); then
+            cp "$cached_file" "$archive_file"
+            from_cache=true
+        elif $_OFFLINE_MODE; then
+            # Offline mode requires cache hit
+            _log_error "Offline mode: no cached archive for $TOOL_NAME $_VERSION ($platform)"
+            _log_info "Cache location: $_CACHE_DIR/$TOOL_NAME/$_VERSION/"
+            _log_info "Download first without --offline flag"
+            _json_result "error" "No cached archive available" "$_VERSION" ""
+            return 1
+        else
+            # Download from network
+            local download_url
+            download_url=$(_get_download_url "$_VERSION" "$platform" "$format")
+            local download_success=false
 
-        local checksums_url=""
-        if $_VERIFY; then
-            checksums_url="https://github.com/$REPO/releases/download/$_VERSION/${TOOL_NAME}-${_VERSION#v}-SHA256SUMS.txt"
+            # Try gh release download first if preferred
+            if $_PREFER_GH && _gh_download "$_VERSION" "$platform" "$format" "$archive_file"; then
+                download_success=true
+            fi
+
+            # Fall back to curl
+            if ! $download_success; then
+                local checksums_url=""
+                if $_VERIFY; then
+                    checksums_url="https://github.com/$REPO/releases/download/$_VERSION/${TOOL_NAME}-${_VERSION#v}-SHA256SUMS.txt"
+                fi
+
+                if _download_and_verify "$download_url" "$archive_file" "$checksums_url"; then
+                    download_success=true
+                else
+                    # If curl failed and gh is available, try gh as last resort
+                    if ! $_PREFER_GH && _gh_download "$_VERSION" "$platform" "$format" "$archive_file"; then
+                        download_success=true
+                    fi
+                fi
+            fi
+
+            if ! $download_success; then
+                _log_error "Failed to download archive"
+                _json_result "error" "Download failed" "$_VERSION" ""
+                return 1
+            fi
+
+            # Cache the downloaded archive for future use
+            _cache_put "$archive_file" "$_VERSION" "$platform" "$format"
         fi
 
-        _download_and_verify "$download_url" "$archive_file" "$checksums_url" || return $?
-
-        # Verify minisign signature if available
-        if $_VERIFY || $_REQUIRE_SIGNATURES; then
+        # Verify minisign signature if available (skip for cached files by default)
+        if ! $from_cache && { $_VERIFY || $_REQUIRE_SIGNATURES; }; then
+            local download_url
+            download_url=$(_get_download_url "$_VERSION" "$platform" "$format")
             local sig_url="${download_url}.minisig"
             _verify_minisign "$archive_file" "$sig_url" || return $?
         fi
