@@ -417,6 +417,269 @@ test_host_is_ready_unknown() {
 }
 
 # ============================================================================
+# Fallback Parser Tests
+# ============================================================================
+
+test_fallback_parser_basic() {
+    ((TESTS_RUN++))
+
+    local result
+    result=$(_hh_parse_host_fallback "testlocal")
+
+    if echo "$result" | jq -e '.platform == "linux/amd64"' &>/dev/null; then
+        pass "Fallback parser extracts platform"
+    else
+        fail "Fallback parser should extract platform, got: $result"
+    fi
+}
+
+test_fallback_parser_connection() {
+    ((TESTS_RUN++))
+
+    local result
+    result=$(_hh_parse_host_fallback "testlocal")
+
+    if echo "$result" | jq -e '.connection == "local"' &>/dev/null; then
+        pass "Fallback parser extracts connection type"
+    else
+        fail "Fallback parser should extract connection, got: $result"
+    fi
+}
+
+test_fallback_parser_capabilities() {
+    ((TESTS_RUN++))
+
+    local result
+    result=$(_hh_parse_host_fallback "testlocal")
+    local caps
+    caps=$(echo "$result" | jq -r '.capabilities')
+
+    if [[ "$caps" == *"rust"* ]] && [[ "$caps" == *"go"* ]]; then
+        pass "Fallback parser extracts capabilities"
+    else
+        fail "Fallback parser should extract capabilities, got: $caps"
+    fi
+}
+
+test_fallback_parser_unknown_host() {
+    ((TESTS_RUN++))
+
+    if ! _hh_parse_host_fallback "this_host_does_not_exist" &>/dev/null; then
+        pass "Fallback parser returns error for unknown host"
+    else
+        fail "Fallback parser should fail for unknown host"
+    fi
+}
+
+test_fallback_list_hosts() {
+    ((TESTS_RUN++))
+
+    local hosts
+    hosts=$(_hh_list_hosts_fallback | tr '\n' ' ')
+
+    if [[ "$hosts" == *"testlocal"* ]] && [[ "$hosts" == *"testremote"* ]]; then
+        pass "Fallback list returns all hosts"
+    else
+        fail "Fallback list should find both hosts, got: $hosts"
+    fi
+}
+
+# ============================================================================
+# Threshold Tests
+# ============================================================================
+
+test_disk_threshold_values() {
+    ((TESTS_RUN++))
+
+    # Verify thresholds are set
+    if [[ $_HH_DISK_WARN_THRESHOLD -eq 90 ]] && [[ $_HH_DISK_ERROR_THRESHOLD -eq 95 ]]; then
+        pass "Disk thresholds have expected defaults"
+    else
+        fail "Disk thresholds: warn=$_HH_DISK_WARN_THRESHOLD error=$_HH_DISK_ERROR_THRESHOLD"
+    fi
+}
+
+test_ssh_timeout_value() {
+    ((TESTS_RUN++))
+
+    if [[ $_HH_SSH_TIMEOUT -eq 10 ]]; then
+        pass "SSH timeout has expected default (10s)"
+    else
+        fail "SSH timeout should be 10, got: $_HH_SSH_TIMEOUT"
+    fi
+}
+
+test_cache_ttl_value() {
+    ((TESTS_RUN++))
+
+    if [[ $_HH_CACHE_TTL -eq 300 ]]; then
+        pass "Cache TTL has expected default (300s)"
+    else
+        fail "Cache TTL should be 300, got: $_HH_CACHE_TTL"
+    fi
+}
+
+# ============================================================================
+# Retry Logic Integration Tests
+# ============================================================================
+
+# Source build_state for retry tests
+source "$PROJECT_ROOT/src/build_state.sh"
+
+test_retry_backoff_calculation() {
+    ((TESTS_RUN++))
+
+    # shellcheck disable=SC2034  # Variable used by sourced module
+    BUILD_RETRY_BASE_DELAY=1
+    local delay0 delay1 delay2
+    delay0=$(_build_calc_backoff 0)
+    delay1=$(_build_calc_backoff 1)
+    delay2=$(_build_calc_backoff 2)
+
+    # Exponential: 1*2^0=1, 1*2^1=2, 1*2^2=4 (plus some jitter)
+    if [[ "$delay0" -ge 1 ]] && [[ "$delay1" -ge "$delay0" ]] && [[ "$delay2" -ge "$delay1" ]]; then
+        pass "Backoff calculation increases correctly"
+    else
+        fail "Backoff should increase: got $delay0, $delay1, $delay2"
+    fi
+
+    # shellcheck disable=SC2034  # Variable used by sourced module
+    BUILD_RETRY_BASE_DELAY=5
+}
+
+test_retry_max_delay_cap() {
+    ((TESTS_RUN++))
+
+    BUILD_RETRY_BASE_DELAY=100
+    BUILD_RETRY_MAX_DELAY=200
+    local delay
+    delay=$(_build_calc_backoff 5)  # 100 * 2^5 = 3200, should cap at 200
+
+    if [[ "$delay" -le 250 ]]; then  # Allow some jitter margin
+        pass "Backoff respects max delay cap"
+    else
+        fail "Backoff exceeded max: got $delay, max was $BUILD_RETRY_MAX_DELAY"
+    fi
+
+    BUILD_RETRY_BASE_DELAY=5
+    BUILD_RETRY_MAX_DELAY=300
+}
+
+test_retry_with_success() {
+    ((TESTS_RUN++))
+
+    BUILD_RETRY_BASE_DELAY=0
+    local attempt=0
+    succeed_after_two() { ((attempt++)); [[ $attempt -ge 2 ]]; }
+
+    if build_retry_with_backoff 3 succeed_after_two 2>/dev/null; then
+        pass "Retry succeeds after transient failure"
+    else
+        fail "Retry should succeed when command eventually passes"
+    fi
+
+    # shellcheck disable=SC2034  # Variable used by sourced module
+    BUILD_RETRY_BASE_DELAY=5
+}
+
+test_retry_state_recording() {
+    ((TESTS_RUN++))
+
+    build_state_init
+    # shellcheck disable=SC2034  # run_id captured for debugging
+    DSR_RUN_ID="test-retry-$$" build_state_create "retry-test" "v1.0.0" "trj" >/dev/null 2>&1
+
+    build_state_update_host "retry-test" "v1.0.0" "trj" "running"
+    build_state_record_retry "retry-test" "v1.0.0" "trj" 1 "SSH timeout"
+
+    local count
+    count=$(build_state_get_retry_count "retry-test" "v1.0.0" "trj")
+
+    if [[ "$count" -eq 1 ]]; then
+        pass "Retry attempt is recorded in state"
+    else
+        fail "Retry count should be 1, got: $count"
+    fi
+}
+
+test_retry_limit_enforcement() {
+    ((TESTS_RUN++))
+
+    build_state_init
+    DSR_RUN_ID="test-limit-$$" build_state_create "limit-test" "v1.0.0" "trj" >/dev/null 2>&1
+    build_state_update_host "limit-test" "v1.0.0" "trj" "running"
+
+    BUILD_RETRY_MAX=2
+    build_state_record_retry "limit-test" "v1.0.0" "trj" 1 "error"
+    build_state_record_retry "limit-test" "v1.0.0" "trj" 2 "error"
+
+    if ! build_state_can_retry "limit-test" "v1.0.0" "trj"; then
+        pass "Retry limit is enforced"
+    else
+        fail "Should not be able to retry after exceeding limit"
+    fi
+
+    # shellcheck disable=SC2034  # Variable used by sourced module
+    BUILD_RETRY_MAX=3
+}
+
+test_resume_plan_generation() {
+    ((TESTS_RUN++))
+
+    build_state_init
+    DSR_RUN_ID="test-resume-$$" build_state_create "resume-test" "v1.0.0" "trj,mmini" >/dev/null 2>&1
+    build_state_update_status "resume-test" "v1.0.0" "running"
+    build_state_update_host "resume-test" "v1.0.0" "trj" "completed"
+    build_state_update_host "resume-test" "v1.0.0" "mmini" "failed"
+
+    local plan
+    plan=$(build_state_resume "resume-test" "v1.0.0")
+
+    if echo "$plan" | jq -e '.can_resume == true' &>/dev/null; then
+        local hosts_to_process
+        hosts_to_process=$(echo "$plan" | jq -r '.hosts_to_process | length')
+        if [[ "$hosts_to_process" -ge 1 ]]; then
+            pass "Resume plan identifies hosts to process"
+        else
+            fail "Resume plan should have hosts to process"
+        fi
+    else
+        fail "Resume should be possible for failed build, got: $plan"
+    fi
+}
+
+test_health_check_with_retry_context() {
+    ((TESTS_RUN++))
+
+    # Test that health check results can be used in retry context
+    build_state_init
+    DSR_RUN_ID="test-health-retry-$$" build_state_create "health-retry" "v1.0.0" "testlocal" >/dev/null 2>&1
+
+    host_health_clear_cache "testlocal"
+    local health_result
+    health_result=$(host_health_check "testlocal" --no-cache --json 2>/dev/null)
+
+    local healthy
+    healthy=$(echo "$health_result" | jq -r '.healthy')
+
+    if [[ "$healthy" == "true" ]]; then
+        build_state_update_host "health-retry" "v1.0.0" "testlocal" "completed"
+        local state
+        state=$(build_state_get "health-retry" "v1.0.0")
+        local host_status
+        host_status=$(echo "$state" | jq -r '.hosts.testlocal.status')
+
+        if [[ "$host_status" == "completed" ]]; then
+            pass "Health check integrates with build state"
+        else
+            fail "Build state should show completed, got: $host_status"
+        fi
+    else
+        fail "testlocal should be healthy"
+    fi
+}
+
+# ============================================================================
 # Run All Tests
 # ============================================================================
 
@@ -456,6 +719,27 @@ test_get_healthy_hosts_includes_local
 test_host_is_ready_local
 test_host_is_ready_unreachable
 test_host_is_ready_unknown
+
+# Fallback parser tests
+test_fallback_parser_basic
+test_fallback_parser_connection
+test_fallback_parser_capabilities
+test_fallback_parser_unknown_host
+test_fallback_list_hosts
+
+# Threshold tests
+test_disk_threshold_values
+test_ssh_timeout_value
+test_cache_ttl_value
+
+# Retry logic tests
+test_retry_backoff_calculation
+test_retry_max_delay_cap
+test_retry_with_success
+test_retry_state_recording
+test_retry_limit_enforcement
+test_resume_plan_generation
+test_health_check_with_retry_context
 
 # Cleanup
 rm -rf "$TEMP_DIR"
