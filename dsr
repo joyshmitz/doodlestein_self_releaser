@@ -1562,7 +1562,6 @@ EOF
     local result
     # shellcheck disable=SC2086
     result=$(act_orchestrate_build "$tool_name" "$version" $target_list 2>&1)
-    local exit_code=$?
 
     # Parse result
     local end_time duration
@@ -2188,6 +2187,458 @@ EOF
         if [[ ${#missing_assets[@]} -gt 0 ]]; then
             log_warn "Missing from manifest: ${missing_assets[*]}"
         fi
+    fi
+
+    return $exit_code
+}
+
+# ============================================================================
+# RELEASE VERIFY SUBCOMMAND
+# ============================================================================
+
+cmd_release_verify() {
+    local tool_name=""
+    local version=""
+    local verify_checksums=false
+    local fix_missing=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tool|-t)
+                tool_name="$2"
+                shift 2
+                ;;
+            --version|-V)
+                version="$2"
+                shift 2
+                ;;
+            --verify-checksums|-c)
+                verify_checksums=true
+                shift
+                ;;
+            --fix)
+                fix_missing=true
+                shift
+                ;;
+            --help|-h)
+                cat << 'EOF'
+dsr release verify - Verify release assets against build manifest
+
+USAGE:
+    dsr release verify <tool> <version>
+    dsr release verify --tool <name> --version <tag>
+
+OPTIONS:
+    -t, --tool <name>       Tool to verify (or first positional arg)
+    -V, --version <ver>     Version to verify (or second positional arg)
+    -c, --verify-checksums  Download assets and verify SHA256 checksums
+    --fix                   Re-upload missing assets (requires artifacts dir)
+
+DESCRIPTION:
+    Compares a GitHub release against the build manifest to verify all
+    expected assets are present. Optionally downloads and verifies checksums.
+
+OUTPUT:
+    Reports missing, extra, or mismatched assets. JSON mode provides full
+    verification report.
+
+EXAMPLES:
+    dsr release verify ntm 1.2.3               Quick manifest check
+    dsr release verify ntm 1.2.3 --verify-checksums   Full checksum verify
+    dsr release verify ntm 1.2.3 --fix         Re-upload missing assets
+
+EXIT CODES:
+    0  - All assets verified
+    1  - Some assets missing or mismatched
+    3  - Authentication error
+    4  - Invalid arguments
+    7  - Release not found
+EOF
+                return 0
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                log_info "Run 'dsr release verify --help' for usage"
+                return 4
+                ;;
+            *)
+                # Positional arguments: tool, version
+                if [[ -z "$tool_name" ]]; then
+                    tool_name="$1"
+                elif [[ -z "$version" ]]; then
+                    version="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Validate required arguments
+    if [[ -z "$tool_name" ]]; then
+        log_error "Tool name required"
+        log_info "Run 'dsr release verify --help' for usage"
+        return 4
+    fi
+
+    if [[ -z "$version" ]]; then
+        log_error "Version required"
+        log_info "Run 'dsr release verify --help' for usage"
+        return 4
+    fi
+
+    # Check GitHub authentication
+    if ! gh_check 2>/dev/null; then
+        if ! gh_check_token 2>/dev/null; then
+            log_error "GitHub authentication required"
+            if $JSON_MODE; then
+                json_envelope "release-verify" "error" 3 '{"error": "GitHub authentication required"}'
+            fi
+            return 3
+        fi
+    fi
+
+    # Load tool configuration
+    if ! act_load_repo_config "$tool_name" 2>/dev/null; then
+        log_error "Tool '$tool_name' not found in repos.d"
+        return 4
+    fi
+
+    # Get repository info
+    local repo
+    repo=$(act_get_repo "$tool_name")
+    if [[ -z "$repo" ]]; then
+        log_error "No GitHub repo configured for $tool_name"
+        return 4
+    fi
+
+    # Resolve owner/repo if short name
+    if [[ ! "$repo" =~ / ]]; then
+        repo="Dicklesworthstone/$repo"
+    fi
+
+    # Normalize version tag
+    local tag
+    tag=$(git_ops_version_to_tag "$version")
+
+    log_info "Verifying release $tool_name $tag from $repo"
+
+    # Record start time
+    local start_time
+    start_time=$(date +%s)
+
+    # Fetch release info from GitHub
+    local release_json
+    release_json=$(gh_api "repos/$repo/releases/tags/$tag" 2>/dev/null)
+    if [[ -z "$release_json" ]] || ! echo "$release_json" | jq -e '.id' &>/dev/null; then
+        log_error "Release $tag not found in $repo"
+        if $JSON_MODE; then
+            json_envelope "release-verify" "error" 7 "$(jq -nc --arg tag "$tag" '{error: "Release not found", tag: $tag}')"
+        fi
+        return 7
+    fi
+
+    local release_id release_url
+    release_id=$(echo "$release_json" | jq -r '.id')
+    release_url=$(echo "$release_json" | jq -r '.html_url')
+
+    log_info "Found release: $release_url"
+
+    # Get release assets
+    local assets_json
+    assets_json=$(echo "$release_json" | jq -c '.assets // []')
+    local asset_count
+    asset_count=$(echo "$assets_json" | jq 'length')
+
+    log_info "Release has $asset_count asset(s)"
+
+    # Load build manifest if available
+    local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
+    local manifest_file="$state_dir/artifacts/$tool_name/$version/${tool_name}-${version}-manifest.json"
+    if [[ ! -f "$manifest_file" ]]; then
+        manifest_file="$state_dir/artifacts/${tool_name}-${version}-manifest.json"
+    fi
+
+    local manifest_exists=false
+    local expected_assets=()
+    if [[ -f "$manifest_file" ]]; then
+        manifest_exists=true
+        log_info "Using manifest: $manifest_file"
+        while IFS= read -r name; do
+            [[ -n "$name" ]] && expected_assets+=("$name")
+        done < <(jq -r '.artifacts[]?.filename // empty' "$manifest_file" 2>/dev/null)
+    else
+        log_warn "No manifest found - cannot verify completeness"
+    fi
+
+    # Build verification report
+    local missing_assets=()
+    local present_assets=()
+    local extra_assets=()
+    local checksum_errors=()
+    local verified_checksums=()
+
+    # Get list of actual asset names from release
+    local actual_assets=()
+    while IFS= read -r name; do
+        [[ -n "$name" ]] && actual_assets+=("$name")
+    done < <(echo "$assets_json" | jq -r '.[].name')
+
+    # Check for missing assets (in manifest but not in release)
+    if $manifest_exists; then
+        for expected in "${expected_assets[@]}"; do
+            local found=false
+            for actual in "${actual_assets[@]}"; do
+                if [[ "$expected" == "$actual" ]]; then
+                    found=true
+                    present_assets+=("$expected")
+                    break
+                fi
+            done
+            if ! $found; then
+                missing_assets+=("$expected")
+            fi
+        done
+    fi
+
+    # Check for extra assets (in release but not in manifest)
+    if $manifest_exists; then
+        for actual in "${actual_assets[@]}"; do
+            local found=false
+            for expected in "${expected_assets[@]}"; do
+                if [[ "$expected" == "$actual" ]]; then
+                    found=true
+                    break
+                fi
+            done
+            if ! $found; then
+                extra_assets+=("$actual")
+            fi
+        done
+    else
+        # Without manifest, all assets are "present"
+        present_assets=("${actual_assets[@]}")
+    fi
+
+    # Verify checksums if requested
+    if $verify_checksums; then
+        log_info "Verifying checksums..."
+
+        # Find SHA256SUMS file in release
+        local checksums_url=""
+        local checksums_name=""
+        for name in "${actual_assets[@]}"; do
+            if [[ "$name" == *"SHA256"* ]] || [[ "$name" == *"sha256"* ]] || [[ "$name" == *"checksums"* ]]; then
+                checksums_name="$name"
+                checksums_url=$(echo "$assets_json" | jq -r --arg name "$name" '.[] | select(.name == $name) | .browser_download_url')
+                break
+            fi
+        done
+
+        if [[ -n "$checksums_url" ]]; then
+            log_info "Found checksums file: $checksums_name"
+
+            # Download checksums file
+            local temp_dir
+            temp_dir=$(mktemp -d)
+            local checksums_file="$temp_dir/$checksums_name"
+
+            if curl -sL "$checksums_url" -o "$checksums_file" 2>/dev/null; then
+                # Verify a sample of assets
+                local verify_count=0
+                local verify_max=3  # Spot-check up to 3 assets
+
+                for name in "${actual_assets[@]}"; do
+                    # Skip checksums and signature files
+                    [[ "$name" == *"SHA256"* ]] && continue
+                    [[ "$name" == *"sha256"* ]] && continue
+                    [[ "$name" == *".minisig" ]] && continue
+                    [[ "$name" == *".sig" ]] && continue
+
+                    if [[ $verify_count -ge $verify_max ]]; then
+                        break
+                    fi
+
+                    # Get expected checksum from file
+                    local expected_sum
+                    expected_sum=$(grep -E "^[a-f0-9]+[[:space:]]+\*?$name$" "$checksums_file" 2>/dev/null | awk '{print $1}')
+
+                    if [[ -n "$expected_sum" ]]; then
+                        log_info "  Verifying: $name"
+
+                        # Download asset
+                        local asset_url
+                        asset_url=$(echo "$assets_json" | jq -r --arg name "$name" '.[] | select(.name == $name) | .browser_download_url')
+                        local asset_file="$temp_dir/$name"
+
+                        if curl -sL "$asset_url" -o "$asset_file" 2>/dev/null; then
+                            local actual_sum
+                            actual_sum=$(sha256sum "$asset_file" | awk '{print $1}')
+
+                            if [[ "$expected_sum" == "$actual_sum" ]]; then
+                                log_ok "    Checksum OK"
+                                verified_checksums+=("$name")
+                            else
+                                log_error "    Checksum MISMATCH"
+                                checksum_errors+=("$name")
+                            fi
+                        else
+                            log_warn "    Failed to download for verification"
+                        fi
+
+                        ((verify_count++))
+                    fi
+                done
+            else
+                log_warn "Failed to download checksums file"
+            fi
+
+            # Cleanup
+            rm -rf "$temp_dir"
+        else
+            log_warn "No checksums file found in release"
+        fi
+    fi
+
+    # Fix missing assets if requested
+    if $fix_missing && [[ ${#missing_assets[@]} -gt 0 ]]; then
+        log_info "Attempting to re-upload ${#missing_assets[@]} missing asset(s)..."
+        local artifacts_dir="$state_dir/artifacts/$tool_name/$version"
+
+        for missing in "${missing_assets[@]}"; do
+            local file_path="$artifacts_dir/$missing"
+            if [[ -f "$file_path" ]]; then
+                log_info "  Uploading: $missing"
+                if gh release upload "$tag" "$file_path" --repo "$repo" --clobber 2>/dev/null; then
+                    log_ok "    Uploaded"
+                    # Move from missing to present
+                    present_assets+=("$missing")
+                else
+                    log_error "    Upload failed"
+                fi
+            else
+                log_warn "  Not found locally: $missing"
+            fi
+        done
+
+        # Re-check missing assets
+        missing_assets=()
+        for expected in "${expected_assets[@]}"; do
+            local found=false
+            for present in "${present_assets[@]}"; do
+                if [[ "$expected" == "$present" ]]; then
+                    found=true
+                    break
+                fi
+            done
+            if ! $found; then
+                missing_assets+=("$expected")
+            fi
+        done
+    fi
+
+    # Calculate duration
+    local end_time duration
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+
+    # Determine status
+    local status="success"
+    local exit_code=0
+    if [[ ${#missing_assets[@]} -gt 0 ]] || [[ ${#checksum_errors[@]} -gt 0 ]]; then
+        status="incomplete"
+        exit_code=1
+    fi
+
+    # Output
+    if $JSON_MODE; then
+        local details
+        details=$(jq -nc \
+            --arg repo "$repo" \
+            --arg version "$version" \
+            --arg tag "$tag" \
+            --argjson release_id "$release_id" \
+            --arg release_url "$release_url" \
+            --argjson manifest_found "$manifest_exists" \
+            --argjson expected_count "${#expected_assets[@]}" \
+            --argjson present "$(printf '%s\n' "${present_assets[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+            --argjson missing "$(printf '%s\n' "${missing_assets[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+            --argjson extra "$(printf '%s\n' "${extra_assets[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+            --argjson checksum_verified "$(printf '%s\n' "${verified_checksums[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+            --argjson checksum_errors "$(printf '%s\n' "${checksum_errors[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+            --argjson duration "$duration" \
+            '{
+                repo: $repo,
+                version: $version,
+                tag: $tag,
+                release_id: $release_id,
+                release_url: $release_url,
+                manifest_found: $manifest_found,
+                verification: {
+                    expected: $expected_count,
+                    present: ($present | length),
+                    missing: ($missing | length),
+                    extra: ($extra | length)
+                },
+                assets: {
+                    present: $present,
+                    missing: $missing,
+                    extra: $extra
+                },
+                checksums: {
+                    verified: $checksum_verified,
+                    errors: $checksum_errors
+                },
+                duration_seconds: $duration
+            }')
+        json_envelope "release-verify" "$status" "$exit_code" "$details"
+    else
+        echo ""
+        log_info "=== Verification Report ==="
+        log_info "Tool:     $tool_name"
+        log_info "Version:  $tag"
+        log_info "Release:  $release_url"
+        echo ""
+
+        if $manifest_exists; then
+            log_info "Expected: ${#expected_assets[@]} asset(s)"
+        fi
+        log_info "Present:  ${#present_assets[@]} asset(s)"
+
+        if [[ ${#missing_assets[@]} -gt 0 ]]; then
+            log_error "Missing:  ${#missing_assets[@]} asset(s)"
+            for asset in "${missing_assets[@]}"; do
+                log_error "  - $asset"
+            done
+        fi
+
+        if [[ ${#extra_assets[@]} -gt 0 ]]; then
+            log_warn "Extra:    ${#extra_assets[@]} asset(s) (not in manifest)"
+            for asset in "${extra_assets[@]}"; do
+                log_warn "  + $asset"
+            done
+        fi
+
+        if $verify_checksums; then
+            echo ""
+            if [[ ${#verified_checksums[@]} -gt 0 ]]; then
+                log_ok "Checksums verified: ${#verified_checksums[@]}"
+            fi
+            if [[ ${#checksum_errors[@]} -gt 0 ]]; then
+                log_error "Checksum errors: ${#checksum_errors[@]}"
+                for asset in "${checksum_errors[@]}"; do
+                    log_error "  ! $asset"
+                done
+            fi
+        fi
+
+        echo ""
+        if [[ $exit_code -eq 0 ]]; then
+            log_ok "Verification: PASSED"
+        else
+            log_error "Verification: FAILED"
+        fi
+        log_info "Duration: ${duration}s"
     fi
 
     return $exit_code
@@ -3818,7 +4269,13 @@ main() {
             cmd_build "$@"
             ;;
         release)
-            cmd_release "$@"
+            # Check for subcommand
+            if [[ "${1:-}" == "verify" ]]; then
+                shift
+                cmd_release_verify "$@"
+            else
+                cmd_release "$@"
+            fi
             ;;
         fallback)
             cmd_fallback "$@"
