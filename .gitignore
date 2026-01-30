@@ -1,2 +1,36 @@
 # bv (beads viewer) local config and caches
 .bv/
+
+# Runtime state and caches (use XDG dirs in production)
+state/
+cache/
+*.log
+
+# User-specific configuration (may contain IPs, hosts, credentials)
+config/hosts.yaml
+config/config.yaml
+secrets/
+
+# Act (nektos/act) artifacts
+.actrc
+*.actrc
+
+# Build artifacts
+artifacts/
+manifests/
+*.minisig
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
