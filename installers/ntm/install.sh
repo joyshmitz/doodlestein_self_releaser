@@ -28,6 +28,7 @@ BINARY_NAME="ntm"
 ARCHIVE_FORMAT_LINUX="tar.gz"
 ARCHIVE_FORMAT_DARWIN="tar.gz"
 ARCHIVE_FORMAT_WINDOWS="zip"
+# shellcheck disable=SC2154  # ${name} etc are literal patterns substituted at runtime
 ARTIFACT_NAMING="${name}-${version}-${os}-${arch}"
 
 # Runtime state
