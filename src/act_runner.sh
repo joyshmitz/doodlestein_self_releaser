@@ -697,6 +697,13 @@ EOF
         return 4
     fi
 
+    # Determine remote path (check host_paths.<host> first, fallback to local_path)
+    local remote_path
+    remote_path=$(yq -r ".host_paths.$host // empty" "$config_file" 2>/dev/null)
+    if [[ -z "$remote_path" ]]; then
+        remote_path="$local_path"
+    fi
+
     # Prepare log file
     local log_dir log_file
     log_dir="$ACT_LOGS_DIR"
@@ -704,7 +711,7 @@ EOF
     log_file="$log_dir/${tool_name}-${platform//\//-}-${run_id:-$$}.log"
 
     _log_info "Building $tool_name for $platform on $host"
-    _log_info "Local path: $local_path"
+    _log_info "Remote path: $remote_path"
     _log_info "Build cmd: $build_cmd"
     _log_info "Log file: $log_file"
 
@@ -718,7 +725,8 @@ EOF
         env_exports+="export $env_pair; "
     done
 
-    local remote_cmd="cd '${local_path//\'/\'\\\'\'}' && $env_exports$build_cmd"
+    # Use remote_path instead of local_path
+    local remote_cmd="cd '${remote_path//\'/\'\\\'\'}' && $env_exports$build_cmd"
 
     # Execute on remote host
     # Use PIPESTATUS to capture the actual command exit code, not tee's
@@ -730,28 +738,49 @@ EOF
     duration=$((end_time - start_time))
 
     # Determine result
-    local status artifact_path
+    local status remote_artifact_path local_artifact_path=""
     if [[ $exit_code -eq 0 ]]; then
         _log_ok "Build completed on $host in ${duration}s"
         status="success"
 
-        # Artifact path depends on language
+        # Remote artifact path depends on language
         local language
         language=$(yq -r '.language // ""' "$config_file" 2>/dev/null)
         case "$language" in
             rust)
-                artifact_path="$local_path/target/release/$binary_name"
+                remote_artifact_path="$remote_path/target/release/$binary_name"
                 ;;
             go)
-                artifact_path="$local_path/$binary_name"
+                remote_artifact_path="$remote_path/$binary_name"
                 ;;
             *)
-                artifact_path="$local_path/$binary_name"
+                remote_artifact_path="$remote_path/$binary_name"
                 ;;
         esac
 
         # Add .exe extension for Windows
-        [[ "$platform" == windows/* ]] && artifact_path+=".exe"
+        [[ "$platform" == windows/* ]] && remote_artifact_path+=".exe"
+
+        # SCP artifact back to local machine
+        # Use run_id if available to group artifacts
+        local artifact_dir="$ACT_ARTIFACTS_DIR/${run_id:-build-$tool_name-$(date +%s)}"
+        mkdir -p "$artifact_dir"
+        local artifact_filename
+        artifact_filename=$(basename "$remote_artifact_path")
+        local_artifact_path="$artifact_dir/$artifact_filename"
+
+        _log_info "Downloading artifact from $host..."
+        if scp -o ConnectTimeout="$_ACT_SSH_TIMEOUT" \
+               -o StrictHostKeyChecking=accept-new \
+               "$host":"'$remote_artifact_path'" "$local_artifact_path" >> "$log_file" 2>&1; then
+            _log_ok "Artifact downloaded: $local_artifact_path"
+        else
+            _log_error "Failed to download artifact from $host"
+            status="failed"
+            exit_code=7
+            local_artifact_path=""
+        fi
+
     elif [[ $exit_code -eq 124 ]]; then
         _log_error "Build timed out on $host after ${_ACT_BUILD_TIMEOUT}s"
         status="timeout"
@@ -762,7 +791,7 @@ EOF
         exit_code=6
     fi
 
-    # Return JSON result
+    # Return JSON result (pointing to LOCAL artifact path)
     cat << EOF
 {
   "tool": "$tool_name",
@@ -772,7 +801,7 @@ EOF
   "status": "$status",
   "exit_code": $exit_code,
   "duration_seconds": $duration,
-  "artifact_path": "${artifact_path:-}",
+  "artifact_path": "${local_artifact_path:-}",
   "log_file": "$log_file"
 }
 EOF
