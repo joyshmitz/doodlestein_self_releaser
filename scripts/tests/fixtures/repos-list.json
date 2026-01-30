@@ -1,0 +1,57 @@
+{
+  "command": "repos",
+  "status": "success",
+  "exit_code": 0,
+  "run_id": "550e8400-e29b-41d4-a716-446655440012",
+  "started_at": "2026-01-30T16:00:00Z",
+  "completed_at": "2026-01-30T16:00:01Z",
+  "duration_ms": 1000,
+  "tool": "dsr",
+  "version": "1.0.0",
+  "schema_version": "1.0.0",
+  "artifacts": [],
+  "warnings": [],
+  "errors": [],
+  "details": {
+    "subcommand": "list",
+    "total_repos": 3,
+    "repos": [
+      {
+        "name": "ntm",
+        "owner": "Dicklesworthstone",
+        "full_name": "Dicklesworthstone/ntm",
+        "local_path": "/data/projects/ntm",
+        "language": "go",
+        "workflow_file": ".github/workflows/release.yml",
+        "build_targets": ["linux/amd64", "darwin/arm64", "windows/amd64"],
+        "enabled": true,
+        "last_build": "2026-01-30T14:30:00Z",
+        "last_release": "v1.5.2"
+      },
+      {
+        "name": "bv",
+        "owner": "Dicklesworthstone",
+        "full_name": "Dicklesworthstone/beads_viewer",
+        "local_path": "/data/projects/beads_viewer",
+        "language": "go",
+        "workflow_file": ".github/workflows/release.yml",
+        "build_targets": ["linux/amd64", "darwin/arm64", "windows/amd64"],
+        "enabled": true,
+        "last_build": "2026-01-28T10:00:00Z",
+        "last_release": "v2.1.0"
+      },
+      {
+        "name": "cass",
+        "owner": "Dicklesworthstone",
+        "full_name": "Dicklesworthstone/coding_agent_session_search",
+        "local_path": "/data/projects/coding_agent_session_search",
+        "language": "rust",
+        "workflow_file": ".github/workflows/release.yml",
+        "build_targets": ["linux/amd64", "darwin/arm64", "windows/amd64"],
+        "enabled": true,
+        "last_build": "2026-01-25T08:00:00Z",
+        "last_release": "v3.0.1"
+      }
+    ]
+  }
+}

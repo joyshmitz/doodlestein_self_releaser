@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dicklesworthstone/doodlestein_self_releaser/schemas/fallback-details.json",
+  "title": "DSR Fallback Details",
+  "description": "Details payload for 'dsr fallback' command - full pipeline execution",
+  "type": "object",
+  "required": ["repo", "version", "stages"],
+  "properties": {
+    "repo": {
+      "type": "string",
+      "description": "Repository that was processed"
+    },
+    "version": {
+      "type": "string",
+      "description": "Version/tag that was built and released"
+    },
+    "trigger": {
+      "type": "string",
+      "enum": ["manual", "throttle-detected", "ci-failure", "scheduled"],
+      "description": "What triggered the fallback"
+    },
+    "stages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/pipeline_stage" },
+      "description": "Pipeline stages executed"
+    },
+    "check_result": {
+      "type": "object",
+      "description": "Embedded check command result",
+      "properties": {
+        "throttled": { "type": "boolean" },
+        "queue_time_seconds": { "type": "integer" },
+        "threshold_seconds": { "type": "integer" }
+      }
+    },
+    "build_result": {
+      "type": "object",
+      "description": "Embedded build command result",
+      "properties": {
+        "targets_succeeded": { "type": "integer" },
+        "targets_failed": { "type": "integer" },
+        "manifest_path": { "type": "string" }
+      }
+    },
+    "release_result": {
+      "type": "object",
+      "description": "Embedded release command result",
+      "properties": {
+        "release_url": { "type": "string", "format": "uri" },
+        "assets_uploaded": { "type": "integer" },
+        "draft": { "type": "boolean" },
+        "prerelease": { "type": "boolean" }
+      }
+    },
+    "total_duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total pipeline duration"
+    },
+    "stopped_at_stage": {
+      "type": "string",
+      "description": "Stage where pipeline stopped (if failed)"
+    },
+    "resume_info": {
+      "type": "object",
+      "properties": {
+        "can_resume": { "type": "boolean" },
+        "resume_from": { "type": "string" },
+        "state_file": { "type": "string" }
+      },
+      "description": "Information for resuming failed pipeline"
+    }
+  },
+  "$defs": {
+    "pipeline_stage": {
+      "type": "object",
+      "required": ["name", "status"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": ["check", "build", "sign", "release", "notify"],
+          "description": "Stage name"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "running", "success", "failed", "skipped"],
+          "description": "Stage execution status"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When stage started"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When stage completed"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Stage duration"
+        },
+        "error": {
+          "type": "string",
+          "description": "Error message if failed"
+        },
+        "output": {
+          "type": "object",
+          "description": "Stage-specific output data"
+        }
+      }
+    }
+  }
+}

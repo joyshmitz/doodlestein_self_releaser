@@ -1,0 +1,64 @@
+{
+  "command": "prune",
+  "status": "success",
+  "exit_code": 0,
+  "run_id": "550e8400-e29b-41d4-a716-446655440011",
+  "started_at": "2026-01-30T16:00:00Z",
+  "completed_at": "2026-01-30T16:00:15Z",
+  "duration_ms": 15000,
+  "tool": "dsr",
+  "version": "1.0.0",
+  "schema_version": "1.0.0",
+  "artifacts": [],
+  "warnings": [],
+  "errors": [],
+  "details": {
+    "items_scanned": 250,
+    "items_pruned": 42,
+    "items_kept": 208,
+    "bytes_freed": 1073741824,
+    "bytes_remaining": 1608515584,
+    "dry_run": false,
+    "categories": [
+      {
+        "name": "artifacts",
+        "scanned": 100,
+        "pruned": 20,
+        "kept": 80,
+        "bytes_freed": 536870912,
+        "path": "~/.local/state/dsr/artifacts"
+      },
+      {
+        "name": "logs",
+        "scanned": 100,
+        "pruned": 15,
+        "kept": 85,
+        "bytes_freed": 5242880,
+        "path": "~/.local/state/dsr/logs"
+      },
+      {
+        "name": "cache",
+        "scanned": 50,
+        "pruned": 7,
+        "kept": 43,
+        "bytes_freed": 531628032,
+        "path": "~/.cache/dsr/act"
+      }
+    ],
+    "retention_policy": {
+      "max_age_days": 30,
+      "max_size_bytes": 5368709120,
+      "keep_last_n": 5,
+      "keep_releases": true
+    },
+    "pruned_items": [
+      {
+        "path": "~/.local/state/dsr/artifacts/ntm-v1.0.0-linux-amd64",
+        "size_bytes": 26843546,
+        "age_days": 45.5,
+        "category": "artifacts",
+        "reason": "exceeded max_age_days"
+      }
+    ]
+  }
+}

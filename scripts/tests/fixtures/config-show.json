@@ -1,0 +1,52 @@
+{
+  "command": "config",
+  "status": "success",
+  "exit_code": 0,
+  "run_id": "550e8400-e29b-41d4-a716-446655440013",
+  "started_at": "2026-01-30T16:00:00Z",
+  "completed_at": "2026-01-30T16:00:00Z",
+  "duration_ms": 50,
+  "tool": "dsr",
+  "version": "1.0.0",
+  "schema_version": "1.0.0",
+  "artifacts": [],
+  "warnings": [],
+  "errors": [],
+  "details": {
+    "subcommand": "show",
+    "config_dir": "~/.config/dsr",
+    "config_file": "~/.config/dsr/config.yaml",
+    "values": {
+      "threshold_seconds": 600,
+      "log_level": "info",
+      "auto_fallback": false,
+      "notification_method": "desktop",
+      "minisign_key_path": "~/.minisign/minisign.key",
+      "artifact_retention_days": 30,
+      "max_parallel_builds": 3,
+      "hosts": {
+        "linux": "trj",
+        "darwin": "mmini",
+        "windows": "wlap"
+      }
+    },
+    "available_keys": [
+      {
+        "key": "threshold_seconds",
+        "type": "integer",
+        "default": 600,
+        "description": "Queue time threshold for throttle detection",
+        "env_var": "DSR_THRESHOLD",
+        "required": false
+      },
+      {
+        "key": "log_level",
+        "type": "string",
+        "default": "info",
+        "description": "Logging verbosity level",
+        "env_var": "DSR_LOG_LEVEL",
+        "required": false
+      }
+    ]
+  }
+}

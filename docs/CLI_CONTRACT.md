@@ -121,6 +121,7 @@ All `--json` output MUST follow this envelope:
   "duration_ms": 12345,
   "tool": "dsr",
   "version": "1.0.0",
+  "schema_version": "1.0.0",
 
   "artifacts": [                 // For build/release commands
     {
@@ -153,6 +154,11 @@ Every JSON response MUST include:
 - `run_id`
 - `started_at`
 - `duration_ms`
+- `tool`
+- `version`
+
+Recommended (additive, backwards compatible):
+- `schema_version`
 
 ### Details Payload
 
@@ -211,6 +217,298 @@ The `details` field contains command-specific data:
     "checksums_published": true,
     "signature_published": true,
     "sbom_published": true
+  }
+}
+```
+
+#### `dsr status` details
+```json
+{
+  "details": {
+    "system_status": "healthy",
+    "repos_summary": {
+      "total": 15,
+      "healthy": 14,
+      "throttled": 1,
+      "unknown": 0
+    },
+    "last_run": {
+      "run_id": "550e8400-e29b-41d4-a716-446655440009",
+      "command": "build",
+      "status": "success",
+      "repo": "ntm",
+      "started_at": "2026-01-30T14:30:00Z",
+      "duration_ms": 180000,
+      "trigger": "throttle-fallback"
+    },
+    "disk_usage": {
+      "artifacts_bytes": 524288000,
+      "logs_bytes": 10485760,
+      "cache_bytes": 2147483648,
+      "total_bytes": 2682257408
+    },
+    "hosts_status": [
+      {"host": "trj", "platform": "linux/amd64", "status": "online"},
+      {"host": "mmini", "platform": "darwin/arm64", "status": "online"},
+      {"host": "wlap", "platform": "windows/amd64", "status": "online"}
+    ],
+    "watch_active": true
+  }
+}
+```
+
+#### `dsr prune` details
+```json
+{
+  "details": {
+    "items_scanned": 250,
+    "items_pruned": 42,
+    "items_kept": 208,
+    "bytes_freed": 1073741824,
+    "bytes_remaining": 1608515584,
+    "dry_run": false,
+    "categories": [
+      {"name": "artifacts", "pruned": 20, "bytes_freed": 536870912},
+      {"name": "logs", "pruned": 15, "bytes_freed": 5242880},
+      {"name": "cache", "pruned": 7, "bytes_freed": 531628032}
+    ],
+    "retention_policy": {
+      "max_age_days": 30,
+      "keep_last_n": 5,
+      "keep_releases": true
+    }
+  }
+}
+```
+
+#### `dsr fallback` details
+```json
+{
+  "details": {
+    "repo": "ntm",
+    "version": "v1.5.3",
+    "trigger": "throttle-detected",
+    "stages": [
+      {"name": "check", "status": "success", "duration_ms": 5000},
+      {"name": "build", "status": "success", "duration_ms": 240000},
+      {"name": "sign", "status": "success", "duration_ms": 5000},
+      {"name": "release", "status": "success", "duration_ms": 80000}
+    ],
+    "check_result": {"throttled": true, "queue_time_seconds": 720},
+    "build_result": {"targets_succeeded": 3, "targets_failed": 0},
+    "release_result": {
+      "release_url": "https://github.com/owner/ntm/releases/tag/v1.5.3",
+      "assets_uploaded": 6
+    },
+    "total_duration_ms": 330000
+  }
+}
+```
+
+#### `dsr repos` details
+```json
+{
+  "details": {
+    "subcommand": "list",
+    "total_repos": 3,
+    "repos": [
+      {
+        "name": "ntm",
+        "owner": "Dicklesworthstone",
+        "language": "go",
+        "build_targets": ["linux/amd64", "darwin/arm64", "windows/amd64"],
+        "enabled": true,
+        "last_release": "v1.5.2"
+      }
+    ]
+  }
+}
+```
+
+#### `dsr config` details
+```json
+{
+  "details": {
+    "subcommand": "show",
+    "config_dir": "~/.config/dsr",
+    "config_file": "~/.config/dsr/config.yaml",
+    "values": {
+      "threshold_seconds": 600,
+      "log_level": "info",
+      "auto_fallback": false,
+      "hosts": {"linux": "trj", "darwin": "mmini", "windows": "wlap"}
+    }
+  }
+}
+```
+
+#### `dsr fallback` details
+Success:
+```json
+{
+  "details": {
+    "repo": "ntm",
+    "version": "v1.2.3",
+    "steps": [
+      {"command": "check", "status": "success", "exit_code": 0, "run_id": "uuid-1", "duration_ms": 1200},
+      {"command": "build", "status": "success", "exit_code": 0, "run_id": "uuid-2", "duration_ms": 45000},
+      {"command": "release", "status": "success", "exit_code": 0, "run_id": "uuid-3", "duration_ms": 8000}
+    ],
+    "build_manifest": "/tmp/dsr/manifests/ntm-v1.2.3.json",
+    "release_url": "https://github.com/owner/ntm/releases/tag/v1.2.3"
+  }
+}
+```
+
+Error:
+```json
+{
+  "details": {
+    "repo": "ntm",
+    "version": "v1.2.3",
+    "steps": [
+      {"command": "check", "status": "success", "exit_code": 0, "run_id": "uuid-1", "duration_ms": 1200},
+      {"command": "build", "status": "error", "exit_code": 6, "run_id": "uuid-2", "duration_ms": 45000, "error": "build failed"}
+    ]
+  }
+}
+```
+
+#### `dsr status` details
+Success:
+```json
+{
+  "details": {
+    "generated_at": "2026-01-30T15:00:00Z",
+    "overall_status": "ok",
+    "config": {"valid": true, "path": "~/.config/dsr/config.yaml", "schema_version": "1.0.0"},
+    "hosts": [
+      {"host": "trj", "status": "ok", "platform": "linux/amd64", "last_checked_at": "2026-01-30T14:59:30Z"},
+      {"host": "mmini", "status": "warn", "platform": "darwin/arm64", "message": "ssh timeout"}
+    ],
+    "queue": {"throttled_count": 0, "threshold_seconds": 600},
+    "last_run": {"command": "check", "status": "success", "exit_code": 0, "run_id": "uuid-1", "duration_ms": 1200}
+  }
+}
+```
+
+Error:
+```json
+{
+  "details": {
+    "generated_at": "2026-01-30T15:00:00Z",
+    "overall_status": "error",
+    "config": {"valid": false, "path": "~/.config/dsr/config.yaml"},
+    "hosts": [{"host": "trj", "status": "error", "message": "disk full"}],
+    "last_run": {"command": "build", "status": "error", "exit_code": 6, "run_id": "uuid-2", "duration_ms": 45000}
+  }
+}
+```
+
+#### `dsr report` details
+Success:
+```json
+{
+  "details": {
+    "generated_at": "2026-01-30T15:00:00Z",
+    "summary": {"runs_last_24h": 12, "failures_last_24h": 1, "throttled_repos": 0},
+    "recent_runs": [
+      {"repo": "ntm", "command": "build", "status": "success", "exit_code": 0, "duration_ms": 32000},
+      {"repo": "bv", "command": "check", "status": "success", "exit_code": 0, "duration_ms": 900}
+    ],
+    "alerts": []
+  }
+}
+```
+
+Error:
+```json
+{
+  "details": {
+    "generated_at": "2026-01-30T15:00:00Z",
+    "summary": {"runs_last_24h": 0, "failures_last_24h": 0, "throttled_repos": 0},
+    "alerts": [{"code": "R001", "message": "report data unavailable"}]
+  }
+}
+```
+
+#### `dsr prune` details
+Success:
+```json
+{
+  "details": {
+    "state_dir": "~/.local/state/dsr",
+    "dry_run": true,
+    "cutoff_days": 30,
+    "pruned_count": 12,
+    "bytes_freed": 104857600,
+    "pruned_paths": [
+      {"path": "~/.local/state/dsr/logs/2025-12-01/run.log", "size_bytes": 2048}
+    ]
+  }
+}
+```
+
+Error:
+```json
+{
+  "details": {
+    "state_dir": "~/.local/state/dsr",
+    "dry_run": true,
+    "cutoff_days": 30,
+    "pruned_count": 0,
+    "bytes_freed": 0,
+    "errors": [{"code": "P001", "message": "state directory not found"}]
+  }
+}
+```
+
+#### `dsr repos` details
+Success:
+```json
+{
+  "details": {
+    "action": "list",
+    "repos": [
+      {"name": "ntm", "repo": "dicklesworthstone/ntm", "local_path": "/data/projects/ntm", "language": "go"}
+    ]
+  }
+}
+```
+
+Error:
+```json
+{
+  "details": {
+    "action": "add",
+    "repo": "dicklesworthstone/ntm",
+    "errors": [{"code": "R001", "message": "repo already exists"}]
+  }
+}
+```
+
+#### `dsr config` details
+Success:
+```json
+{
+  "details": {
+    "action": "migrate",
+    "from_version": "0.9.0",
+    "to_version": "1.0.0",
+    "config_file": "~/.config/dsr/config.yaml",
+    "backup_path": "~/.config/dsr/config.yaml.bak"
+  }
+}
+```
+
+Error:
+```json
+{
+  "details": {
+    "action": "validate",
+    "config_file": "~/.config/dsr/config.yaml",
+    "valid": false,
+    "errors": [{"code": "C001", "message": "missing schema_version"}]
   }
 }
 ```
@@ -315,8 +613,29 @@ Manage repository registry.
 dsr repos list [--format table|json]
 dsr repos add <owner/repo> [--local-path <path>] [--language <lang>]
 dsr repos remove <name>
+dsr repos validate [--repo <name>]
+dsr repos discover [--org <name>] [--language <lang>]
 dsr repos sync
 ```
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List all registered repositories |
+| `add` | Add a repository to the registry |
+| `remove` | Remove a repository from the registry |
+| `validate` | Validate repository configurations |
+| `discover` | Discover repositories that could benefit from dsr |
+| `sync` | Sync repository metadata from GitHub |
+
+**validate subcommand:**
+- Checks workflow file exists
+- Validates local path accessibility
+- Verifies build target compatibility
+
+**discover subcommand:**
+- Scans GitHub org/user for repos with releases
+- Identifies repos with compatible release workflows
+- Suggests appropriate build targets based on language
 
 ---
 
@@ -325,11 +644,30 @@ dsr repos sync
 View and modify configuration.
 
 ```bash
-dsr config show
-dsr config set <key> <value>
+dsr config show [--section <name>]
+dsr config set <key>=<value>
 dsr config get <key>
-dsr config init
+dsr config init [--force]
+dsr config validate
+dsr config migrate [--dry-run]
+dsr config edit
 ```
+
+| Subcommand | Description |
+|------------|-------------|
+| `show` | Display current configuration |
+| `set` | Set a configuration value |
+| `get` | Get a specific configuration value |
+| `init` | Initialize configuration with defaults |
+| `validate` | Validate configuration files |
+| `migrate` | Migrate config to latest schema version |
+| `edit` | Open config file in $EDITOR |
+
+**migrate subcommand:**
+- Detects config schema version
+- Applies necessary transformations
+- Creates backup before migration
+- Reports all changes made
 
 ---
 
@@ -348,6 +686,49 @@ Checks:
 - SSH access to build hosts (mmini, wlap)
 - minisign key configured
 - syft installed for SBOM generation
+
+---
+
+### `dsr status`
+
+Show system status and recent activity summary.
+
+```bash
+dsr status [--watch] [--compact]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--watch` | false | Continuously update status display |
+| `--compact` | false | Minimal one-line summary |
+
+**Exit codes:**
+- `0`: System healthy
+- `1`: System degraded (some issues)
+- `3`: System unhealthy (critical issues)
+
+---
+
+### `dsr prune`
+
+Clean up old artifacts, logs, and cache to free disk space.
+
+```bash
+dsr prune [--dry-run] [--max-age <days>] [--keep-last <n>] [--force]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | false | Show what would be deleted without deleting |
+| `--max-age` | 30 | Delete items older than N days |
+| `--keep-last` | 5 | Always keep the N most recent items per repo |
+| `--keep-releases` | true | Never delete artifacts for published releases |
+| `--force` | false | Skip confirmation prompt |
+
+**Exit codes:**
+- `0`: Prune completed successfully
+- `1`: Partial cleanup (some files couldn't be deleted)
+- `4`: Invalid arguments
 
 ---
 

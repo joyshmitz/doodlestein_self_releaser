@@ -1,0 +1,83 @@
+{
+  "command": "status",
+  "status": "success",
+  "exit_code": 0,
+  "run_id": "550e8400-e29b-41d4-a716-446655440010",
+  "started_at": "2026-01-30T16:00:00Z",
+  "completed_at": "2026-01-30T16:00:02Z",
+  "duration_ms": 2000,
+  "tool": "dsr",
+  "version": "1.0.0",
+  "schema_version": "1.0.0",
+  "artifacts": [],
+  "warnings": [],
+  "errors": [],
+  "details": {
+    "system_status": "healthy",
+    "repos_summary": {
+      "total": 15,
+      "healthy": 14,
+      "throttled": 1,
+      "unknown": 0
+    },
+    "last_run": {
+      "run_id": "550e8400-e29b-41d4-a716-446655440009",
+      "command": "build",
+      "status": "success",
+      "repo": "ntm",
+      "started_at": "2026-01-30T14:30:00Z",
+      "duration_ms": 180000,
+      "trigger": "throttle-fallback"
+    },
+    "recent_runs": [
+      {
+        "run_id": "550e8400-e29b-41d4-a716-446655440009",
+        "command": "build",
+        "status": "success",
+        "repo": "ntm",
+        "started_at": "2026-01-30T14:30:00Z",
+        "duration_ms": 180000,
+        "trigger": "throttle-fallback"
+      },
+      {
+        "run_id": "550e8400-e29b-41d4-a716-446655440008",
+        "command": "check",
+        "status": "success",
+        "started_at": "2026-01-30T14:00:00Z",
+        "duration_ms": 5000,
+        "trigger": "scheduled"
+      }
+    ],
+    "disk_usage": {
+      "artifacts_bytes": 524288000,
+      "logs_bytes": 10485760,
+      "cache_bytes": 2147483648,
+      "total_bytes": 2682257408
+    },
+    "hosts_status": [
+      {
+        "host": "trj",
+        "platform": "linux/amd64",
+        "status": "online",
+        "last_seen": "2026-01-30T15:59:00Z",
+        "latency_ms": 1
+      },
+      {
+        "host": "mmini",
+        "platform": "darwin/arm64",
+        "status": "online",
+        "last_seen": "2026-01-30T15:59:00Z",
+        "latency_ms": 12
+      },
+      {
+        "host": "wlap",
+        "platform": "windows/amd64",
+        "status": "online",
+        "last_seen": "2026-01-30T15:59:00Z",
+        "latency_ms": 8
+      }
+    ],
+    "watch_active": true,
+    "uptime_seconds": 86400
+  }
+}

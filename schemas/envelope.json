@@ -9,7 +9,12 @@
     "command": {
       "type": "string",
       "description": "Subcommand that was executed",
-      "enum": ["check", "watch", "build", "release", "fallback", "repos", "config", "doctor"]
+      "enum": ["check", "watch", "build", "release", "fallback", "repos", "config", "doctor", "status", "prune"]
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version for backward compatibility (additive changes only)"
     },
     "status": {
       "type": "string",

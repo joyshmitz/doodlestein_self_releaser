@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dicklesworthstone/doodlestein_self_releaser/schemas/status-details.json",
+  "title": "DSR Status Details",
+  "description": "Details payload for 'dsr status' and 'dsr report' commands",
+  "type": "object",
+  "required": ["system_status", "repos_summary"],
+  "properties": {
+    "system_status": {
+      "type": "string",
+      "enum": ["healthy", "degraded", "unhealthy"],
+      "description": "Overall system health status"
+    },
+    "repos_summary": {
+      "type": "object",
+      "required": ["total", "healthy", "throttled", "unknown"],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total registered repositories"
+        },
+        "healthy": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Repositories with healthy CI queue times"
+        },
+        "throttled": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Repositories experiencing throttling"
+        },
+        "unknown": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Repositories with unknown status"
+        }
+      }
+    },
+    "last_run": {
+      "$ref": "#/$defs/run_summary",
+      "description": "Summary of the most recent dsr operation"
+    },
+    "recent_runs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/run_summary" },
+      "description": "List of recent dsr operations"
+    },
+    "disk_usage": {
+      "type": "object",
+      "properties": {
+        "artifacts_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total bytes used by cached artifacts"
+        },
+        "logs_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total bytes used by logs"
+        },
+        "cache_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total bytes used by act cache"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total disk usage"
+        }
+      },
+      "description": "Disk usage statistics"
+    },
+    "hosts_status": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/host_status" },
+      "description": "Status of build hosts"
+    },
+    "uptime_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Seconds since dsr watch daemon started (if running)"
+    },
+    "watch_active": {
+      "type": "boolean",
+      "description": "Whether dsr watch is currently running"
+    }
+  },
+  "$defs": {
+    "run_summary": {
+      "type": "object",
+      "required": ["run_id", "command", "status", "started_at"],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique run identifier"
+        },
+        "command": {
+          "type": "string",
+          "description": "Command that was executed"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["success", "partial", "error"],
+          "description": "Run status"
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repository affected (if applicable)"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the run started"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Run duration"
+        },
+        "trigger": {
+          "type": "string",
+          "enum": ["manual", "throttle-fallback", "ci-failure", "scheduled"],
+          "description": "What triggered this run"
+        }
+      }
+    },
+    "host_status": {
+      "type": "object",
+      "required": ["host", "platform", "status"],
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "Host identifier (trj, mmini, wlap)"
+        },
+        "platform": {
+          "type": "string",
+          "pattern": "^(linux|darwin|windows)/(amd64|arm64)$",
+          "description": "Platform this host builds"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["online", "offline", "degraded"],
+          "description": "Host availability status"
+        },
+        "last_seen": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last successful health check"
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Network latency to host"
+        }
+      }
+    }
+  }
+}
