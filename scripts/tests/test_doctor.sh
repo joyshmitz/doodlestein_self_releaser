@@ -76,7 +76,7 @@ test_doctor_json_valid() {
     ((TESTS_RUN++))
 
     local output
-    output=$("$DSR_CMD" --json doctor --quick 2>&1)
+    output=$("$DSR_CMD" --json doctor --quick 2>/dev/null)
 
     if echo "$output" | jq . >/dev/null 2>&1; then
         pass "--json doctor produces valid JSON"
@@ -89,7 +89,7 @@ test_doctor_json_has_status() {
     ((TESTS_RUN++))
 
     local output
-    output=$("$DSR_CMD" --json doctor --quick 2>&1)
+    output=$("$DSR_CMD" --json doctor --quick 2>/dev/null)
 
     if echo "$output" | jq -e '.status' >/dev/null 2>&1; then
         pass "doctor JSON has status field"
@@ -102,7 +102,7 @@ test_doctor_json_has_checks_array() {
     ((TESTS_RUN++))
 
     local output
-    output=$("$DSR_CMD" --json doctor --quick 2>&1)
+    output=$("$DSR_CMD" --json doctor --quick 2>/dev/null)
 
     if echo "$output" | jq -e '.details.checks | type == "array"' >/dev/null 2>&1; then
         pass "doctor JSON has checks array"
@@ -115,7 +115,7 @@ test_doctor_json_check_has_name() {
     ((TESTS_RUN++))
 
     local output
-    output=$("$DSR_CMD" --json doctor --quick 2>&1)
+    output=$("$DSR_CMD" --json doctor --quick 2>/dev/null)
 
     # All checks should have a name field
     local invalid_checks
@@ -132,7 +132,7 @@ test_doctor_json_check_has_status() {
     ((TESTS_RUN++))
 
     local output
-    output=$("$DSR_CMD" --json doctor --quick 2>&1)
+    output=$("$DSR_CMD" --json doctor --quick 2>/dev/null)
 
     # All checks should have a status field (ok, warning, error)
     local has_status
@@ -153,7 +153,7 @@ test_doctor_detects_git() {
     ((TESTS_RUN++))
 
     local output
-    output=$("$DSR_CMD" --json doctor --quick 2>&1)
+    output=$("$DSR_CMD" --json doctor --quick 2>/dev/null)
 
     if echo "$output" | jq -e '.details.checks[] | select(.name == "git")' >/dev/null 2>&1; then
         pass "doctor checks for git"
@@ -166,7 +166,7 @@ test_doctor_detects_gh() {
     ((TESTS_RUN++))
 
     local output
-    output=$("$DSR_CMD" --json doctor --quick 2>&1)
+    output=$("$DSR_CMD" --json doctor --quick 2>/dev/null)
 
     if echo "$output" | jq -e '.details.checks[] | select(.name == "gh")' >/dev/null 2>&1; then
         pass "doctor checks for gh"
@@ -179,7 +179,7 @@ test_doctor_detects_jq() {
     ((TESTS_RUN++))
 
     local output
-    output=$("$DSR_CMD" --json doctor --quick 2>&1)
+    output=$("$DSR_CMD" --json doctor --quick 2>/dev/null)
 
     if echo "$output" | jq -e '.details.checks[] | select(.name == "jq")' >/dev/null 2>&1; then
         pass "doctor checks for jq"
@@ -196,8 +196,8 @@ test_doctor_quick_skips_build_tools() {
     ((TESTS_RUN++))
 
     local quick_output full_output
-    quick_output=$("$DSR_CMD" --json doctor --quick 2>&1)
-    full_output=$("$DSR_CMD" --json doctor 2>&1)
+    quick_output=$("$DSR_CMD" --json doctor --quick 2>/dev/null)
+    full_output=$("$DSR_CMD" --json doctor 2>/dev/null)
 
     local quick_checks full_checks
     quick_checks=$(echo "$quick_output" | jq -r '.details.checks | length' 2>/dev/null)
