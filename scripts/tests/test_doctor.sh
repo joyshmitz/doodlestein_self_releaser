@@ -79,9 +79,9 @@ test_doctor_json_valid() {
     output=$("$DSR_CMD" --json doctor --quick 2>&1)
 
     if echo "$output" | jq . >/dev/null 2>&1; then
-        pass "doctor --json produces valid JSON"
+        pass "--json doctor produces valid JSON"
     else
-        fail "doctor --json should produce valid JSON"
+        fail "--json doctor should produce valid JSON"
     fi
 }
 
@@ -197,7 +197,7 @@ test_doctor_quick_skips_build_tools() {
 
     local quick_output full_output
     quick_output=$("$DSR_CMD" --json doctor --quick 2>&1)
-    full_output=$("$DSR_CMD" doctor --json 2>&1)
+    full_output=$("$DSR_CMD" --json doctor 2>&1)
 
     local quick_checks full_checks
     quick_checks=$(echo "$quick_output" | jq -r '.details.checks | length' 2>/dev/null)
@@ -236,7 +236,7 @@ test_doctor_fix_mode_shows_fixes() {
     ((TESTS_RUN++))
 
     local output
-    output=$("$DSR_CMD" doctor --quick --fix --json 2>&1)
+    output=$("$DSR_CMD" --json doctor --quick --fix 2>&1)
 
     # Fix mode should include fixes array in JSON output
     if echo "$output" | jq -e '.details.fixes | type' >/dev/null 2>&1; then
