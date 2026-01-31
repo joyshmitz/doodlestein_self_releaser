@@ -1569,31 +1569,41 @@ EOF
     start_time=$(date +%s)
 
     # Run orchestrated build
-    local result
+    local full_output
     # shellcheck disable=SC2086
-    result=$(act_orchestrate_build "$tool_name" "$version" $target_list 2>&1)
+    full_output=$(act_orchestrate_build "$tool_name" "$version" $target_list 2>&1)
+
+    # Extract JSON from mixed output (orchestrator logs + JSON at end)
+    # The JSON starts with a standalone { line and ends with standalone }
+    local result
+    result=$(echo "$full_output" | awk '
+        /^{$/ { json = ""; capturing = 1 }
+        capturing { json = json $0 "\n" }
+        /^}$/ && capturing { capturing = 0 }
+        END { printf "%s", json }
+    ')
 
     # Parse result
     local end_time duration
     end_time=$(date +%s)
     duration=$((end_time - start_time))
 
-    # Extract summary from result
+    # Extract summary from JSON result
     local total success failed
-    total=$(echo "$result" | grep -o '"total":[0-9]*' | grep -o '[0-9]*' | tail -1)
-    success=$(echo "$result" | grep -o '"success":[0-9]*' | grep -o '[0-9]*' | tail -1)
-    failed=$(echo "$result" | grep -o '"failed":[0-9]*' | grep -o '[0-9]*' | tail -1)
+    total=$(echo "$result" | jq -r '.summary.total // 0' 2>/dev/null || echo 0)
+    success=$(echo "$result" | jq -r '.summary.success // 0' 2>/dev/null || echo 0)
+    failed=$(echo "$result" | jq -r '.summary.failed // 0' 2>/dev/null || echo 0)
 
     # Default values if parsing failed
-    [[ -z "$total" ]] && total=0
-    [[ -z "$success" ]] && success=0
-    [[ -z "$failed" ]] && failed=0
+    [[ -z "$total" || "$total" == "null" ]] && total=0
+    [[ -z "$success" || "$success" == "null" ]] && success=0
+    [[ -z "$failed" || "$failed" == "null" ]] && failed=0
 
     # Generate manifest
     local manifest_file="$output_dir/${tool_name}-${version}-manifest.json"
     if [[ $success -gt 0 ]]; then
-        # Generate manifest from results
-        act_generate_manifest "$tool_name" "$version" "$output_dir" > "$manifest_file" 2>/dev/null || true
+        # Generate manifest from orchestration result JSON
+        act_generate_manifest "$result" "$manifest_file" 2>/dev/null || true
     fi
 
     # Output
@@ -1761,6 +1771,161 @@ EOF
 # RELEASE SUBCOMMAND
 # ============================================================================
 
+_dispatch_is_true() {
+    case "${1:-}" in
+        true|TRUE|1|yes|YES|y|Y) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_dispatch_join_lines() {
+    # Join newline-separated values into comma-separated string
+    local input="$1"
+    echo "$input" | tr '\n' ',' | sed 's/,$//'
+}
+
+_dispatch_load_config() {
+    local tool_name="$1"
+
+    local enabled=""
+    local event_type=""
+    local repos_csv=""
+
+    # Env overrides (highest precedence)
+    [[ -n "${DSR_DISPATCH_ENABLED:-}" ]] && enabled="$DSR_DISPATCH_ENABLED"
+    [[ -n "${DSR_DISPATCH_EVENT:-}" ]] && event_type="$DSR_DISPATCH_EVENT"
+    [[ -n "${DSR_DISPATCH_REPOS:-}" ]] && repos_csv="$DSR_DISPATCH_REPOS"
+
+    # Config file overrides (requires yq)
+    if command -v yq &>/dev/null; then
+        local config_dir="${DSR_CONFIG_DIR:-$HOME/.config/dsr}"
+        local tool_config="$config_dir/repos.d/${tool_name}.yaml"
+        local cfg_enabled cfg_event cfg_repos
+
+        if [[ -f "$tool_config" ]]; then
+            cfg_enabled=$(yq -r '.dispatch.enabled // empty' "$tool_config" 2>/dev/null || echo "")
+            cfg_event=$(yq -r '.dispatch.event_type // empty' "$tool_config" 2>/dev/null || echo "")
+            cfg_repos=$(_dispatch_join_lines "$(yq -r '.dispatch.repos[]? // empty' "$tool_config" 2>/dev/null || true)")
+
+            [[ -z "$enabled" && -n "$cfg_enabled" ]] && enabled="$cfg_enabled"
+            [[ -z "$event_type" && -n "$cfg_event" ]] && event_type="$cfg_event"
+            [[ -z "$repos_csv" && -n "$cfg_repos" ]] && repos_csv="$cfg_repos"
+        fi
+
+        if [[ -f "${DSR_CONFIG_FILE:-$config_dir/config.yaml}" ]]; then
+            cfg_enabled=$(yq -r '.dispatch.enabled // empty' "${DSR_CONFIG_FILE:-$config_dir/config.yaml}" 2>/dev/null || echo "")
+            cfg_event=$(yq -r '.dispatch.event_type // empty' "${DSR_CONFIG_FILE:-$config_dir/config.yaml}" 2>/dev/null || echo "")
+            cfg_repos=$(_dispatch_join_lines "$(yq -r '.dispatch.repos[]? // empty' "${DSR_CONFIG_FILE:-$config_dir/config.yaml}" 2>/dev/null || true)")
+
+            [[ -z "$enabled" && -n "$cfg_enabled" ]] && enabled="$cfg_enabled"
+            [[ -z "$event_type" && -n "$cfg_event" ]] && event_type="$cfg_event"
+            [[ -z "$repos_csv" && -n "$cfg_repos" ]] && repos_csv="$cfg_repos"
+        fi
+    fi
+
+    # Defaults
+    [[ -z "$event_type" ]] && event_type="dsr_release"
+    if [[ -z "$enabled" && -n "$repos_csv" ]]; then
+        enabled="true"
+    fi
+
+    echo "$enabled|$event_type|$repos_csv"
+}
+
+_dispatch_send_all() {
+    local tool_name="$1"
+    local version="$2"
+    local tag="$3"
+    local source_repo="$4"
+    local git_sha="$5"
+    local release_url="$6"
+    local event_type="$7"
+    local repos_csv="$8"
+    local run_id="$9"
+
+    if [[ -z "$repos_csv" ]]; then
+        echo "[]"
+        return 2
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        log_warn "jq not available; skipping repository dispatch"
+        echo "[]"
+        return 2
+    fi
+
+    local payload
+    payload=$(jq -nc \
+        --arg tool "$tool_name" \
+        --arg version "$version" \
+        --arg tag "$tag" \
+        --arg repo "$source_repo" \
+        --arg sha "$git_sha" \
+        --arg run_id "$run_id" \
+        --arg release_url "$release_url" \
+        '{tool: $tool, version: $version, tag: $tag, repo: $repo, sha: $sha, run_id: $run_id, release_url: $release_url}')
+
+    local results=()
+    local any_failed=0
+    local total=0
+    local target
+    IFS=',' read -ra targets <<< "$repos_csv"
+    for target in "${targets[@]}"; do
+        target="$(echo "$target" | xargs)"
+        [[ -z "$target" ]] && continue
+
+        if [[ "$target" != */* ]]; then
+            target="Dicklesworthstone/$target"
+        fi
+
+        log_info "Dispatching $event_type to $target" "\"tool\":\"$tool_name\",\"version\":\"$version\",\"run_id\":\"$run_id\""
+
+        local dispatch_status="success"
+        local dispatch_error=""
+
+        if command -v build_retry_with_backoff &>/dev/null; then
+            if ! build_retry_with_backoff "${DSR_DISPATCH_RETRIES:-3}" gh_repository_dispatch "$target" "$event_type" "$payload"; then
+                dispatch_status="failed"
+                dispatch_error="dispatch failed"
+            fi
+        else
+            if ! gh_repository_dispatch "$target" "$event_type" "$payload"; then
+                dispatch_status="failed"
+                dispatch_error="dispatch failed"
+            fi
+        fi
+
+        if [[ "$dispatch_status" == "success" ]]; then
+            log_ok "Dispatch sent to $target"
+        else
+            log_warn "Dispatch failed for $target"
+        fi
+
+        [[ "$dispatch_status" == "failed" ]] && any_failed=1
+        total=$((total + 1))
+
+        results+=("$(jq -nc \
+            --arg repo "$target" \
+            --arg status "$dispatch_status" \
+            --arg error "$dispatch_error" \
+            '{repo: $repo, status: $status, error: (if $error == "" then null else $error end)}')")
+    done
+
+    if [[ ${#results[@]} -gt 0 ]]; then
+        printf '%s\n' "${results[@]}" | jq -s '.'
+    else
+        echo "[]"
+    fi
+
+    if [[ $total -eq 0 ]]; then
+        return 2
+    fi
+    if [[ $any_failed -eq 1 ]]; then
+        return 1
+    fi
+    return 0
+}
+
 cmd_release() {
     local tool_name=""
     local version=""
@@ -1771,6 +1936,9 @@ cmd_release() {
     local verify_tag=false
     local resume=false
     local verify_upgrade=false
+    local dispatch_override=""
+    local dispatch_event_override=""
+    local dispatch_repos_override=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -1813,6 +1981,22 @@ cmd_release() {
                 verify_upgrade=true
                 shift
                 ;;
+            --dispatch)
+                dispatch_override="true"
+                shift
+                ;;
+            --no-dispatch)
+                dispatch_override="false"
+                shift
+                ;;
+            --dispatch-event)
+                dispatch_event_override="$2"
+                shift 2
+                ;;
+            --dispatch-repos)
+                dispatch_repos_override="$2"
+                shift 2
+                ;;
             --help|-h)
                 cat << 'EOF'
 dsr release - Upload artifacts to GitHub
@@ -1835,6 +2019,10 @@ OPTIONS:
     --generate-notes         Auto-generate release notes
     --verify-tag             Verify tag exists before release
     --verify-upgrade         Run upgrade verification after successful release
+    --dispatch               Trigger repository dispatch after release
+    --no-dispatch            Disable repository dispatch for this run
+    --dispatch-event <name>  Override dispatch event type
+    --dispatch-repos <list>  Comma-separated override of dispatch targets
     -r, --resume             Resume interrupted upload
 
 DESCRIPTION:
@@ -1851,6 +2039,7 @@ EXAMPLES:
     dsr release ntm 1.2.3                   Create release v1.2.3
     dsr release ntm 1.2.3 --draft           Create as draft
     dsr release ntm 1.2.3 --verify-upgrade  Release + verify upgrade works
+    dsr release ntm 1.2.3 --dispatch        Release + dispatch downstream workflows
     dsr release ntm 1.2.3 --resume          Resume interrupted upload
     dsr release verify ntm 1.2.3            Verify release assets
     dsr release --tool bv --version 2.0.0   Full flag syntax
@@ -2167,6 +2356,40 @@ EOF
         exit_code=1
     fi
 
+    # Repository dispatch (post-release hook)
+    local dispatch_enabled dispatch_event dispatch_repos
+    local dispatch_results_json="[]"
+    local dispatch_status="skipped"
+    local dispatch_cfg
+
+    dispatch_cfg=$(_dispatch_load_config "$tool_name")
+    IFS='|' read -r dispatch_enabled dispatch_event dispatch_repos <<< "$dispatch_cfg"
+
+    [[ -n "$dispatch_override" ]] && dispatch_enabled="$dispatch_override"
+    [[ -n "$dispatch_event_override" ]] && dispatch_event="$dispatch_event_override"
+    [[ -n "$dispatch_repos_override" ]] && dispatch_repos="$dispatch_repos_override"
+
+    if _dispatch_is_true "$dispatch_enabled" && [[ -n "$dispatch_repos" ]] && [[ $exit_code -eq 0 ]]; then
+        local git_sha=""
+        if [[ -n "$local_path" && -d "$local_path" ]]; then
+            git_sha=$(git_ops_tag_sha "$local_path" "$tag" 2>/dev/null || true)
+        fi
+        if [[ -z "$git_sha" ]]; then
+            git_sha=$(gh_resolve_tag_sha "$repo" "$tag" 2>/dev/null || true)
+        fi
+        [[ -z "$git_sha" ]] && git_sha="unknown"
+
+        local dispatch_exit=0
+        dispatch_results_json=$(_dispatch_send_all "$tool_name" "$version" "$tag" "$repo" "$git_sha" "$release_url" "$dispatch_event" "$dispatch_repos" "${DSR_RUN_ID:-run-unknown}") || dispatch_exit=$?
+        case "$dispatch_exit" in
+            0) dispatch_status="completed" ;;
+            2) dispatch_status="skipped" ;;
+            *) dispatch_status="failed" ;;
+        esac
+    elif _dispatch_is_true "$dispatch_enabled" && [[ -z "$dispatch_repos" ]]; then
+        log_warn "Dispatch enabled but no target repos configured"
+    fi
+
     # Clean up upload state on success
     if [[ $failed_count -eq 0 ]]; then
         rm -f "$upload_state_file"
@@ -2192,6 +2415,10 @@ EOF
             --argjson failed_count "$failed_count" \
             --argjson skipped "$skipped_count" \
             --argjson duration "$duration" \
+            --arg dispatch_status "$dispatch_status" \
+            --arg dispatch_event "$dispatch_event" \
+            --arg dispatch_repos "$dispatch_repos" \
+            --argjson dispatch_results "$dispatch_results_json" \
             '{
                 repo: $repo,
                 version: $version,
@@ -2208,7 +2435,13 @@ EOF
                 success: $success,
                 failed: $failed_count,
                 skipped: $skipped,
-                duration_seconds: $duration
+                duration_seconds: $duration,
+                dispatch: {
+                    status: $dispatch_status,
+                    event: $dispatch_event,
+                    repos: (if $dispatch_repos == "" then [] else ($dispatch_repos | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) end),
+                    results: $dispatch_results
+                }
             }')
         json_envelope "release" "$status" "$exit_code" "$details"
     else

@@ -112,14 +112,17 @@ act_can_run() {
 }
 
 # Run a workflow via act
-# Usage: act_run_workflow <repo_path> <workflow> [job] [event] [extra_args...]
+# Usage: act_run_workflow <repo_path> <workflow> [job] [event] [version] [extra_args...]
 # Returns: exit code (0=success, 1=partial, 6=build failed, 3=dependency error)
+# Note: When version is provided, GITHUB_REF/GITHUB_REF_NAME/GITHUB_REF_TYPE are injected
+#       to simulate a tag push for release workflows
 act_run_workflow() {
     local repo_path="$1"
     local workflow="$2"
     local job="${3:-}"
     local event="${4:-push}"
-    shift 4 2>/dev/null || true
+    local version="${5:-}"
+    shift 5 2>/dev/null || true
     local extra_args=("$@")
 
     if ! act_check; then
@@ -154,6 +157,16 @@ act_run_workflow() {
 
     # Add event
     act_cmd+=("$event")
+
+    # Inject tag context for release workflows when version is provided
+    # This simulates a tag push so workflows can detect the version
+    if [[ -n "$version" ]]; then
+        local tag="v${version#v}"  # Ensure v prefix, avoid doubling
+        act_cmd+=(--env "GITHUB_REF=refs/tags/$tag")
+        act_cmd+=(--env "GITHUB_REF_NAME=$tag")
+        act_cmd+=(--env "GITHUB_REF_TYPE=tag")
+        _log_info "Injecting tag context: $tag"
+    fi
 
     # Add any extra arguments
     if [[ ${#extra_args[@]} -gt 0 ]]; then
@@ -340,10 +353,10 @@ act_load_repo_config() {
     fi
 
     # Load config into variables
-    ACT_REPO_NAME=$(yq -r '.tool_name // empty' "$config_file")
-    ACT_REPO_GITHUB=$(yq -r '.repo // empty' "$config_file")
-    ACT_REPO_LOCAL_PATH=$(yq -r '.local_path // empty' "$config_file")
-    ACT_REPO_LANGUAGE=$(yq -r '.language // empty' "$config_file")
+    ACT_REPO_NAME=$(yq -r '.tool_name // ""' "$config_file")
+    ACT_REPO_GITHUB=$(yq -r '.repo // ""' "$config_file")
+    ACT_REPO_LOCAL_PATH=$(yq -r '.local_path // ""' "$config_file")
+    ACT_REPO_LANGUAGE=$(yq -r '.language // ""' "$config_file")
     ACT_REPO_WORKFLOW=$(yq -r '.workflow // ".github/workflows/release.yml"' "$config_file")
 
     export ACT_REPO_NAME ACT_REPO_GITHUB ACT_REPO_LOCAL_PATH ACT_REPO_LANGUAGE ACT_REPO_WORKFLOW
@@ -368,7 +381,7 @@ act_get_job_for_target() {
     # Use yq to extract the job mapping
     # Format in YAML: act_job_map.linux/amd64: build-linux
     local job
-    job=$(yq -r ".act_job_map.\"$platform\" // empty" "$config_file" 2>/dev/null)
+    job=$(yq -r '.act_job_map."'"$platform"'" // ""' "$config_file" 2>/dev/null)
 
     # Handle null values (native build required)
     if [[ "$job" == "null" || -z "$job" ]]; then
@@ -414,21 +427,21 @@ act_get_flags() {
 
     # Get platform-specific image override
     local image
-    image=$(yq -r ".act_overrides.platform_image // empty" "$config_file" 2>/dev/null)
+    image=$(yq -r '.act_overrides.platform_image // ""' "$config_file" 2>/dev/null)
     if [[ -n "$image" ]]; then
         flags+=("-P ubuntu-latest=$image")
     fi
 
     # Get secrets file if specified
     local secrets_file
-    secrets_file=$(yq -r ".act_overrides.secrets_file // empty" "$config_file" 2>/dev/null)
+    secrets_file=$(yq -r '.act_overrides.secrets_file // ""' "$config_file" 2>/dev/null)
     if [[ -n "$secrets_file" ]]; then
         flags+=("--secret-file $secrets_file")
     fi
 
     # Get env file if specified
     local env_file
-    env_file=$(yq -r ".act_overrides.env_file // empty" "$config_file" 2>/dev/null)
+    env_file=$(yq -r '.act_overrides.env_file // ""' "$config_file" 2>/dev/null)
     if [[ -n "$env_file" ]]; then
         flags+=("--env-file $env_file")
     fi
@@ -437,7 +450,7 @@ act_get_flags() {
     if [[ "$platform" == "linux/arm64" ]]; then
         # Check for ARM64 specific overrides
         local arm64_flags
-        arm64_flags=$(yq -r '.act_overrides.linux_arm64_flags[]? // empty' "$config_file" 2>/dev/null)
+        arm64_flags=$(yq -r '.act_overrides.linux_arm64_flags[]? // ""' "$config_file" 2>/dev/null)
         if [[ -n "$arm64_flags" ]]; then
             while IFS= read -r flag; do
                 flags+=("$flag")
@@ -699,7 +712,7 @@ EOF
 
     # Determine remote path (check host_paths.<host> first, fallback to local_path)
     local remote_path
-    remote_path=$(yq -r ".host_paths.$host // empty" "$config_file" 2>/dev/null)
+    remote_path=$(yq -r '.host_paths.'"$host"' // ""' "$config_file" 2>/dev/null)
     if [[ -z "$remote_path" ]]; then
         remote_path="$local_path"
     fi
@@ -889,8 +902,30 @@ act_orchestrate_build() {
             local act_args=()
             [[ -n "$extra_flags" ]] && read -ra act_args <<< "$extra_flags"
 
-            # Run act workflow
-            result=$(act_run_workflow "$local_path" "$workflow" "$job" "push" "${act_args[@]}" 2>&1) || exit_code=$?
+            # Run act workflow with version for tag context injection
+            local full_output
+            full_output=$(act_run_workflow "$local_path" "$workflow" "$job" "push" "$version" "${act_args[@]}" 2>&1) || exit_code=$?
+
+            # Extract JSON from mixed output (act logs + JSON at end)
+            # The JSON starts with a standalone { line and ends with standalone }
+            result=$(echo "$full_output" | awk '
+                /^{$/ { json = ""; capturing = 1 }
+                capturing { json = json $0 "\n" }
+                /^}$/ && capturing { capturing = 0 }
+                END { printf "%s", json }
+            ')
+
+            # Fallback if no JSON found
+            if [[ -z "$result" ]] || ! echo "$result" | jq -e '.' &>/dev/null; then
+                _log_warn "Could not parse JSON from act output, creating status from exit code"
+                result=$(cat <<EOFJ
+{
+  "status": "$([ "$exit_code" -eq 0 ] && echo "success" || echo "failed")",
+  "exit_code": $exit_code
+}
+EOFJ
+)
+            fi
 
             # Wrap in consistent format
             result=$(echo "$result" | jq --arg target "$target" --arg method "act" \
@@ -1008,10 +1043,11 @@ act_generate_manifest() {
             generated_at: $generated_at,
             artifacts: ($targets | map(select(.status == "success") | {
                 platform: .platform,
-                host: .host,
+                host: (.host // "local"),
                 method: .method,
-                path: .artifact_path,
-                filename: (.artifact_path | split("/") | last),
+                path: (.artifact_path // .artifact_dir // null),
+                artifact_dir: .artifact_dir,
+                artifact_count: .artifact_count,
                 duration_seconds: .duration_seconds
             }))
         }')
