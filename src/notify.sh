@@ -145,7 +145,12 @@ _notify_slack() {
   local payload text
   text="$title - $message"
   text=$(_notify_redact "$text")
-  payload="{\"text\":\"$(_notify_json_escape "$text")\"}"
+  # Use jq for safe JSON construction
+  if command -v jq &>/dev/null; then
+    payload=$(jq -nc --arg text "$text" '{text: $text}')
+  else
+    payload="{\"text\":\"$(_notify_json_escape "$text")\"}"
+  fi
 
   if ! curl -sS -X POST -H "Content-type: application/json" --data "$payload" "$webhook" >/dev/null 2>&1; then
     _notify_log_warn "Slack notification failed"
@@ -178,7 +183,12 @@ _notify_discord() {
   local payload text
   text="$title - $message"
   text=$(_notify_redact "$text")
-  payload="{\"content\":\"$(_notify_json_escape "$text")\"}"
+  # Use jq for safe JSON construction
+  if command -v jq &>/dev/null; then
+    payload=$(jq -nc --arg content "$text" '{content: $content}')
+  else
+    payload="{\"content\":\"$(_notify_json_escape "$text")\"}"
+  fi
 
   if ! curl -sS -X POST -H "Content-type: application/json" --data "$payload" "$webhook" >/dev/null 2>&1; then
     _notify_log_warn "Discord notification failed"
@@ -270,15 +280,29 @@ notify_event() {
   clean_message=$(_notify_redact "$message")
 
   local payload
-  payload=$(
-    printf '{"event":"%s","level":"%s","title":"%s","message":"%s","run_id":"%s","ts":"%s"}' \
-      "$(_notify_json_escape "$event")" \
-      "$(_notify_json_escape "$level")" \
-      "$(_notify_json_escape "$clean_title")" \
-      "$(_notify_json_escape "$clean_message")" \
-      "$(_notify_json_escape "$run_id")" \
-      "$(_notify_now)"
-  )
+  local ts
+  ts=$(_notify_now)
+  # Use jq for safe JSON construction if available
+  if command -v jq &>/dev/null; then
+    payload=$(jq -nc \
+      --arg event "$event" \
+      --arg level "$level" \
+      --arg title "$clean_title" \
+      --arg message "$clean_message" \
+      --arg run_id "$run_id" \
+      --arg ts "$ts" \
+      '{event: $event, level: $level, title: $title, message: $message, run_id: $run_id, ts: $ts}')
+  else
+    payload=$(
+      printf '{"event":"%s","level":"%s","title":"%s","message":"%s","run_id":"%s","ts":"%s"}' \
+        "$(_notify_json_escape "$event")" \
+        "$(_notify_json_escape "$level")" \
+        "$(_notify_json_escape "$clean_title")" \
+        "$(_notify_json_escape "$clean_message")" \
+        "$(_notify_json_escape "$run_id")" \
+        "$ts"
+    )
+  fi
 
   local any_sent=false
   local method
