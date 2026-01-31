@@ -450,20 +450,17 @@ version_tag_all() {
     done
 
     if $json_mode; then
-        echo "{"
-        echo "  \"tagged\": $tagged,"
-        echo "  \"skipped\": $skipped,"
-        echo "  \"failed\": $failed,"
-        echo "  \"results\": ["
-        local first=true
-        for r in "${results[@]}"; do
-            $first || echo ","
-            first=false
-            echo -n "    $r"
-        done
-        echo ""
-        echo "  ]"
-        echo "}"
+        # Combine results array into JSON array
+        local results_json="[]"
+        if [[ ${#results[@]} -gt 0 ]]; then
+            results_json=$(printf '%s\n' "${results[@]}" | jq -s '.')
+        fi
+        jq -nc \
+            --argjson tagged "$tagged" \
+            --argjson skipped "$skipped" \
+            --argjson failed "$failed" \
+            --argjson results "$results_json" \
+            '{tagged: $tagged, skipped: $skipped, failed: $failed, results: $results}'
     else
         log_info "Version tagging complete: $tagged tagged, $skipped skipped, $failed failed"
     fi
