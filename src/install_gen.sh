@@ -588,15 +588,14 @@ _install_skills() {
         return 0
     fi
 
-    local installed_any=false
+    # Check if skill content is available before announcing anything
+    local skill_content
+    skill_content=$(_decode_skill_content)
+    if [[ -z "$skill_content" ]]; then
+        return 0  # No skill content embedded, skip silently
+    fi
 
-    echo "" >&2
-    _log_info "Installing AI coding agent skills..."
-    _log_info ""
-    _log_info "Skills teach AI agents (Claude Code, Codex CLI) about ${TOOL_NAME}'s"
-    _log_info "commands, workflows, and best practices. When you invoke /${TOOL_NAME} in"
-    _log_info "a conversation, the agent gains specialized knowledge about the tool."
-    _log_info ""
+    local installed_any=false
 
     # Try Claude Code
     if _install_claude_skill; then
@@ -610,10 +609,10 @@ _install_skills() {
 
     if $installed_any; then
         echo "" >&2
-        _log_info "How to use the ${TOOL_NAME} skill:"
-        _log_info "  1. Start a conversation with Claude Code or Codex CLI"
-        _log_info "  2. Type /${TOOL_NAME} to invoke the skill"
-        _log_info "  3. The agent will have full knowledge of ${TOOL_NAME} commands"
+        _log_info "AI coding agent skills installed for ${TOOL_NAME}"
+        _log_info ""
+        _log_info "Skills teach AI agents about ${TOOL_NAME}'s commands and workflows."
+        _log_info "To use: type /${TOOL_NAME} in Claude Code or Codex CLI conversations."
         echo "" >&2
     fi
 
