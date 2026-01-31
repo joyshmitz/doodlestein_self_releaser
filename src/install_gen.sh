@@ -137,15 +137,21 @@ _json_result() {
     local path="${4:-}"
 
     if $_JSON_MODE; then
-        cat << EOF
-{
-  "tool": "$TOOL_NAME",
-  "status": "$status",
-  "message": "$message",
-  "version": "$version",
-  "path": "$path"
-}
-EOF
+        if command -v jq &>/dev/null; then
+            jq -nc \
+                --arg tool "$TOOL_NAME" \
+                --arg status "$status" \
+                --arg message "$message" \
+                --arg version "$version" \
+                --arg path "$path" \
+                '{tool: $tool, status: $status, message: $message, version: $version, path: $path}'
+        else
+            # Fallback for systems without jq - escape quotes manually
+            local esc_msg="${message//\"/\\\"}"
+            local esc_path="${path//\"/\\\"}"
+            printf '{"tool":"%s","status":"%s","message":"%s","version":"%s","path":"%s"}\n' \
+                "$TOOL_NAME" "$status" "$esc_msg" "$version" "$esc_path"
+        fi
     fi
 }
 

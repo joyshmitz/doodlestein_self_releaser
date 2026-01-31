@@ -191,8 +191,8 @@ EOF
     # Handle skip-checks
     if $skip_checks; then
         _qg_log_warn "Skipping quality checks (--skip-checks)"
-        jq -nc '{
-            tool: "'"$tool_name"'",
+        jq -nc --arg tool "$tool_name" '{
+            tool: $tool,
             skipped: true,
             checks: [],
             passed: 0,
