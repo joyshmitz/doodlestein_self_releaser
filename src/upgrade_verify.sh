@@ -62,6 +62,9 @@ upgrade_verify_tool() {
         log_debug "Found $tool_name at: $bin_path"
     fi
 
+    # Track if we built from source (for cleanup)
+    local built_tmpdir=""
+
     # Build from source if requested or not found
     if $build_from_source || [[ -z "$bin_path" ]]; then
         local repo_dir
@@ -79,6 +82,9 @@ upgrade_verify_tool() {
             log_error "Failed to build $tool_name"
             return 1
         fi
+
+        # Track the tmpdir for cleanup (bin_path is like /tmp/xxx/tool)
+        built_tmpdir=$(dirname "$bin_path")
     fi
 
     if [[ -z "$bin_path" ]]; then
@@ -92,6 +98,7 @@ upgrade_verify_tool() {
 
     if $dry_run; then
         log_info "[DRY RUN] Would run: $bin_path upgrade --check"
+        [[ -n "$built_tmpdir" ]] && rm -rf "$built_tmpdir"
         return 0
     fi
 
@@ -113,6 +120,7 @@ upgrade_verify_tool() {
         found_asset=false
         log_error "$tool_name upgrade --check: Asset naming mismatch"
         log_error "Output: $output"
+        [[ -n "$built_tmpdir" ]] && rm -rf "$built_tmpdir"
         return 1
     elif [[ $exit_code -eq 0 ]]; then
         # Exit 0 usually means success
@@ -120,9 +128,9 @@ upgrade_verify_tool() {
         log_ok "$tool_name upgrade --check: Completed successfully"
     fi
 
-    # Extract versions if present
-    current_version=$(echo "$output" | grep -oP 'current.*?(\d+\.\d+\.\d+)' | grep -oP '\d+\.\d+\.\d+' | head -1)
-    latest_version=$(echo "$output" | grep -oP 'latest.*?(\d+\.\d+\.\d+)' | grep -oP '\d+\.\d+\.\d+' | head -1)
+    # Extract versions if present (using portable grep -oE)
+    current_version=$(echo "$output" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    latest_version=$(echo "$output" | grep -i 'latest' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
 
     if [[ -n "$current_version" ]]; then
         log_debug "Current version: $current_version"
@@ -140,6 +148,9 @@ upgrade_verify_tool() {
         darwin/arm64) platform="darwin/arm64" ;;
         darwin/x86_64) platform="darwin/amd64" ;;
     esac
+
+    # Cleanup built binary tmpdir
+    [[ -n "$built_tmpdir" ]] && rm -rf "$built_tmpdir"
 
     if $found_asset; then
         log_ok "Upgrade verification PASSED for $tool_name on $platform"
