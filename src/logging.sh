@@ -127,20 +127,28 @@ _log() {
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-  # Build JSON log entry
-  local escaped_msg
+  # Build JSON log entry with proper escaping for all fields
+  local escaped_msg escaped_run_id escaped_cmd escaped_tool escaped_host
   escaped_msg="$(_json_escape "$msg")"
+  escaped_run_id="$(_json_escape "$DSR_RUN_ID")"
+  escaped_cmd="$(_json_escape "${DSR_CURRENT_CMD:-}")"
 
   local json="{"
   json+="\"ts\":\"$ts\","
-  json+="\"run_id\":\"$DSR_RUN_ID\","
+  json+="\"run_id\":\"$escaped_run_id\","
   json+="\"level\":\"$level\","
-  json+="\"cmd\":\"${DSR_CURRENT_CMD:-}\","
+  json+="\"cmd\":\"$escaped_cmd\","
   json+="\"msg\":\"$escaped_msg\""
 
-  # Add optional context fields
-  [[ -n "${DSR_CURRENT_TOOL:-}" ]] && json+=",\"tool\":\"$DSR_CURRENT_TOOL\""
-  [[ -n "${DSR_CURRENT_HOST:-}" ]] && json+=",\"host\":\"$DSR_CURRENT_HOST\""
+  # Add optional context fields with escaping
+  if [[ -n "${DSR_CURRENT_TOOL:-}" ]]; then
+    escaped_tool="$(_json_escape "$DSR_CURRENT_TOOL")"
+    json+=",\"tool\":\"$escaped_tool\""
+  fi
+  if [[ -n "${DSR_CURRENT_HOST:-}" ]]; then
+    escaped_host="$(_json_escape "$DSR_CURRENT_HOST")"
+    json+=",\"host\":\"$escaped_host\""
+  fi
 
   # Add extra fields (must be valid JSON key-value pairs)
   [[ -n "$extras" ]] && json+=",$extras"
