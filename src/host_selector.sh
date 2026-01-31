@@ -146,7 +146,23 @@ selector_acquire_slot() {
                 "$@"
             ) 200>"$global_lock_file"
         else
+            # Fallback: mkdir-based locking (atomic on POSIX systems)
+            local lock_dir="$global_lock_file.d"
+            local max_wait=30
+            local waited=0
+            while ! mkdir "$lock_dir" 2>/dev/null; do
+                if [[ $waited -ge $max_wait ]]; then
+                    _sel_log_warn "Lock acquisition timeout (flock unavailable, using mkdir fallback)"
+                    return 2
+                fi
+                sleep 1
+                ((waited++))
+            done
+            # Run command and cleanup
             "$@"
+            local ret=$?
+            rmdir "$lock_dir" 2>/dev/null
+            return $ret
         fi
     }
 

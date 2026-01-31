@@ -166,6 +166,30 @@ test_signing_sign_missing_key() {
   run_expect_fail "signing_sign fails without private key" signing_sign "$TEMP_DIR/ghost.bin" >/dev/null
 }
 
+test_signing_sign_multiple_files_error() {
+  # Restore key for this test
+  signing_init --no-password >/dev/null 2>&1
+  local a="$TEMP_DIR/multi_a.bin"
+  local b="$TEMP_DIR/multi_b.bin"
+  echo "a" > "$a"
+  echo "b" > "$b"
+
+  # signing_sign should reject multiple files (use signing_sign_batch instead)
+  run_expect_fail "signing_sign rejects multiple files" signing_sign "$a" "$b" 2>/dev/null
+}
+
+test_signing_verify_multiple_files_error() {
+  local a="$TEMP_DIR/verify_a.bin"
+  local b="$TEMP_DIR/verify_b.bin"
+  echo "a" > "$a"
+  echo "b" > "$b"
+  signing_sign "$a" >/dev/null 2>&1
+  signing_sign "$b" >/dev/null 2>&1
+
+  # signing_verify should reject multiple files
+  run_expect_fail "signing_verify rejects multiple files" signing_verify "$a" "$b" 2>/dev/null
+}
+
 # Main
 echo "Running signing module tests..."
 echo ""
@@ -178,6 +202,8 @@ test_signing_sign_and_verify
 test_signing_verify_failure
 test_signing_sign_batch
 test_signing_sign_missing_key
+test_signing_sign_multiple_files_error
+test_signing_verify_multiple_files_error
 
 echo ""
 echo "=========================================="

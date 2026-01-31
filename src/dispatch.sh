@@ -369,10 +369,10 @@ EOF
 
         if dispatch_event "${dispatch_args[@]}"; then
             ((dispatched++))
-            results+=("{\"repo\": \"$repo\", \"status\": \"success\"}")
+            results+=("$(jq -nc --arg repo "$repo" '{repo: $repo, status: "success"}')")
         else
             ((failed++))
-            results+=("{\"repo\": \"$repo\", \"status\": \"error\"}")
+            results+=("$(jq -nc --arg repo "$repo" '{repo: $repo, status: "error"}')")
         fi
     done
 

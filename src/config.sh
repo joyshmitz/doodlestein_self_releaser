@@ -294,7 +294,8 @@ config_set() {
     DSR_CONFIG["$key"]="$value"
 
     if $persist && command -v yq &>/dev/null; then
-        yq -i ".$key = \"$value\"" "$DSR_CONFIG_FILE"
+        # Use --arg to safely escape the value
+        yq -i --arg v "$value" ".$key = \$v" "$DSR_CONFIG_FILE"
         _cfg_log_ok "Set $key = $value (persisted)"
     else
         _cfg_log_info "Set $key = $value (in memory)"

@@ -398,10 +398,8 @@ build_state_update_host() {
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
   # Ensure extra_json is valid JSON (default to empty object)
-  # Use simple string check to avoid regex issues across shell versions
-  if [[ -z "$extra_json" ]]; then
-    extra_json='{}'
-  elif [[ "${extra_json:0:1}" != "{" ]]; then
+  # Use jq for proper validation
+  if [[ -z "$extra_json" ]] || ! echo "$extra_json" | jq empty &>/dev/null; then
     extra_json='{}'
   fi
 

@@ -269,6 +269,10 @@ EOF
                 return 4
                 ;;
             *)
+                if [[ -n "$file" ]]; then
+                    _sign_log_error "Multiple files specified. Use signing_sign_batch for multiple files."
+                    return 4
+                fi
                 file="$1"
                 shift
                 ;;
@@ -344,6 +348,10 @@ EOF
                 return 4
                 ;;
             *)
+                if [[ -n "$file" ]]; then
+                    _sign_log_error "Multiple files specified. Verify files one at a time."
+                    return 4
+                fi
                 file="$1"
                 shift
                 ;;
