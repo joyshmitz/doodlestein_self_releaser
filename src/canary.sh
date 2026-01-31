@@ -151,7 +151,7 @@ $install_deps
 
 # Run installer
 echo "Installing $tool..."
-if [[ -f "/install.sh" ]]; then
+if [ -f "/install.sh" ]; then
     # Local installer
     $shell /install.sh --mode $mode --non-interactive 2>&1 || true
 else
@@ -186,7 +186,7 @@ else
 
     # Check common install locations
     for dir in /usr/local/bin /usr/bin ~/.local/bin; do
-        if [[ -f "\$dir/$tool" ]]; then
+        if [ -f "\$dir/$tool" ]; then
             echo "Found at: \$dir/$tool"
         fi
     done

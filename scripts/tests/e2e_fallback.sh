@@ -286,6 +286,217 @@ test_fallback_dry_run_json_valid() {
 }
 
 # ============================================================================
+# Tests: Full Pipeline (mocked act + release)
+# ============================================================================
+
+seed_fallback_repo() {
+    local repo_dir="$1"
+
+    mkdir -p "$repo_dir/.github/workflows"
+    cat > "$repo_dir/.github/workflows/release.yml" << 'YAML'
+name: Release
+on:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "build"
+YAML
+
+    echo "test repo" > "$repo_dir/README.md"
+
+    git -C "$repo_dir" init -q
+    git -C "$repo_dir" config user.email "test@example.com"
+    git -C "$repo_dir" config user.name "Test User"
+    git -C "$repo_dir" add .
+    git -C "$repo_dir" commit -m "init" -q
+    git -C "$repo_dir" tag "v1.2.3"
+}
+
+seed_fallback_config() {
+    local repo_dir="$1"
+
+    mkdir -p "$DSR_CONFIG_DIR/repos.d"
+
+    cat > "$DSR_CONFIG_DIR/repos.d/test-tool.yaml" << YAML
+tool_name: test-tool
+repo: testuser/test-tool
+local_path: "$repo_dir"
+language: go
+workflow: .github/workflows/release.yml
+targets:
+  - linux/amd64
+act_job_map:
+  linux/amd64: build
+YAML
+}
+
+setup_fallback_mocks() {
+    mock_init
+
+    export MOCK_LOG_DIR="$_MOCK_BIN_DIR"
+
+    mock_command_script "act" "$(cat <<'EOF'
+echo "$@" >> "$MOCK_LOG_DIR/act.calls"
+artifact_dir=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--artifact-server-path" ]]; then
+    artifact_dir="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [[ -n "$artifact_dir" ]]; then
+  mkdir -p "$artifact_dir"
+  parent_dir=$(dirname "$artifact_dir")
+  name="${MOCK_TOOL_NAME:-mock-tool}-linux-amd64"
+  echo "artifact" > "$artifact_dir/$name"
+  echo "artifact" > "$parent_dir/$name"
+fi
+exit 0
+EOF
+)"
+
+    mock_command_script "gh" "$(cat <<'EOF'
+echo "$@" >> "$MOCK_LOG_DIR/gh.calls"
+if [[ "$1" == "auth" && "$2" == "status" ]]; then
+  echo "Logged in"
+  exit 0
+fi
+if [[ "$1" == "auth" && "$2" == "token" ]]; then
+  echo "test-token"
+  exit 0
+fi
+if [[ "$1" == "api" ]]; then
+  cat >/dev/null
+  cat <<JSON
+{"id": 123, "upload_url": "https://uploads.example.com/repos/testuser/test-tool/releases/123/assets{?name,label}", "html_url": "https://github.com/testuser/test-tool/releases/tag/v1.2.3"}
+JSON
+  exit 0
+fi
+echo "{}"
+exit 0
+EOF
+)"
+
+    mock_command_script "curl" "$(cat <<'EOF'
+echo "$@" >> "$MOCK_LOG_DIR/curl.calls"
+printf '{"ok":true}\n__HTTP_CODE__201'
+exit 0
+EOF
+)"
+
+    mock_command "docker" "Docker OK" 0
+}
+
+test_fallback_pipeline_mocked() {
+    ((TESTS_RUN++))
+    harness_setup
+
+    if ! command -v yq &>/dev/null; then
+        skip "yq not installed - skipping mocked pipeline test"
+        harness_teardown
+        return 0
+    fi
+    if ! command -v jq &>/dev/null; then
+        skip "jq not installed - skipping mocked pipeline test"
+        harness_teardown
+        return 0
+    fi
+    if ! command -v git &>/dev/null; then
+        skip "git not available - skipping mocked pipeline test"
+        harness_teardown
+        return 0
+    fi
+    if ! command -v timeout &>/dev/null; then
+        skip "timeout not available - skipping mocked pipeline test"
+        harness_teardown
+        return 0
+    fi
+
+    local repo_dir
+    repo_dir="$(harness_tmpdir)/repo"
+    seed_fallback_repo "$repo_dir"
+    seed_fallback_config "$repo_dir"
+
+    export MOCK_TOOL_NAME="test-tool"
+    export GITHUB_TOKEN="test-token"
+
+    local output_dir="$DSR_STATE_DIR/artifacts/fallback-test"
+    export ACT_ARTIFACTS_DIR="$output_dir"
+
+    setup_fallback_mocks
+
+    exec_run "$DSR_CMD" --json fallback test-tool --version 1.2.3 --skip-checks --output-dir "$output_dir"
+
+    local status
+    status=$(exec_status)
+
+    if [[ "$status" -eq 0 ]]; then
+        pass "fallback pipeline exits successfully with mocks"
+    else
+        fail "fallback pipeline should succeed with mocks (exit: $status)"
+        echo "stderr: $(exec_stderr | head -20)"
+    fi
+
+    local output
+    output=$(exec_stdout)
+
+    if echo "$output" | jq -e '.command == "fallback"' >/dev/null 2>&1; then
+        pass "fallback --json returns envelope"
+    else
+        fail "fallback --json should return valid envelope"
+        echo "stdout: ${output:0:300}"
+    fi
+
+    if echo "$output" | jq -e '.details.phases.build == "success" and .details.phases.release == "success"' >/dev/null 2>&1; then
+        pass "fallback phases report build + release success"
+    else
+        fail "fallback phases should report build + release success"
+        echo "stdout: ${output:0:300}"
+    fi
+
+    if echo "$output" | jq -e '.details.phases.checks == "skipped"' >/dev/null 2>&1; then
+        pass "fallback reports checks skipped when --skip-checks used"
+    else
+        fail "fallback should report checks skipped"
+    fi
+
+    if echo "$output" | jq -e '.details.artifacts_count >= 1' >/dev/null 2>&1; then
+        pass "fallback reports at least one artifact"
+    else
+        fail "fallback should report artifacts_count >= 1"
+    fi
+
+    local act_calls gh_calls curl_calls
+    act_calls=$(mock_call_count "act")
+    gh_calls=$(mock_call_count "gh")
+    curl_calls=$(mock_call_count "curl")
+
+    if [[ "$act_calls" -gt 0 ]]; then
+        pass "act invoked during fallback pipeline"
+    else
+        fail "act should be invoked during fallback pipeline"
+    fi
+
+    if [[ "$gh_calls" -gt 0 ]]; then
+        pass "gh invoked during fallback release"
+    else
+        fail "gh should be invoked during fallback release"
+    fi
+
+    if [[ "$curl_calls" -gt 0 ]]; then
+        pass "curl invoked to upload assets"
+    else
+        fail "curl should be invoked to upload assets"
+    fi
+
+    harness_teardown
+}
+
+# ============================================================================
 # Cleanup
 # ============================================================================
 
@@ -325,6 +536,10 @@ echo ""
 echo "Dry-Run Tests (require real config + gh auth):"
 test_fallback_dry_run_with_real_config
 test_fallback_dry_run_json_valid
+
+echo ""
+echo "Full Pipeline (mocked act + release):"
+test_fallback_pipeline_mocked
 
 echo ""
 echo "=========================================="
