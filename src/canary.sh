@@ -290,11 +290,11 @@ canary_run_image() {
         if canary_run_test "$tool" "$image" "$mode"; then
             log_ok "  $tool: PASSED"
             ((passed++))
-            results+=("{\"tool\": \"$tool\", \"status\": \"passed\", \"duration\": $(($(date +%s) - start_time))}")
+            results+=("$(jq -nc --arg tool "$tool" --argjson duration "$(($(date +%s) - start_time))" '{tool: $tool, status: "passed", duration: $duration}')")
         else
             log_error "  $tool: FAILED"
             ((failed++))
-            results+=("{\"tool\": \"$tool\", \"status\": \"failed\", \"duration\": $(($(date +%s) - start_time))}")
+            results+=("$(jq -nc --arg tool "$tool" --argjson duration "$(($(date +%s) - start_time))" '{tool: $tool, status: "failed", duration: $duration}')")
         fi
     done
 

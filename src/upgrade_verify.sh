@@ -206,7 +206,7 @@ upgrade_verify_all() {
         if ! $has_upgrade; then
             log_debug "Skipping $tool_name: no upgrade command"
             ((skipped++))
-            results+=("{\"tool\": \"$tool_name\", \"status\": \"skipped\", \"reason\": \"no upgrade command\"}")
+            results+=("$(jq -nc --arg tool "$tool_name" '{tool: $tool, status: "skipped", reason: "no upgrade command"}')")
             continue
         fi
 
@@ -217,10 +217,10 @@ upgrade_verify_all() {
         # shellcheck disable=SC2086
         if upgrade_verify_tool "$tool_name" $args; then
             ((passed++))
-            results+=("{\"tool\": \"$tool_name\", \"status\": \"passed\"}")
+            results+=("$(jq -nc --arg tool "$tool_name" '{tool: $tool, status: "passed"}')")
         else
             ((failed++))
-            results+=("{\"tool\": \"$tool_name\", \"status\": \"failed\"}")
+            results+=("$(jq -nc --arg tool "$tool_name" '{tool: $tool, status: "failed"}')")
         fi
     done
 
@@ -254,14 +254,10 @@ upgrade_verify_json() {
         bin_path=$(command -v "$tool_name" 2>/dev/null || echo "")
 
         if [[ -z "$bin_path" ]]; then
-            cat << EOF
-{
-  "tool": "$tool_name",
-  "status": "error",
-  "error": "Tool not found in PATH",
-  "platform": "$platform"
-}
-EOF
+            jq -nc \
+                --arg tool "$tool_name" \
+                --arg platform "$platform" \
+                '{tool: $tool, status: "error", error: "Tool not found in PATH", platform: $platform}'
             return 1
         fi
 
@@ -279,16 +275,23 @@ EOF
             status=1
         fi
 
-        cat << EOF
-{
-  "tool": "$tool_name",
-  "status": "$([ $status -eq 0 ] && echo "passed" || echo "failed")",
-  "platform": "$platform",
-  "found_asset": $found_asset,
-  "exit_code": ${exit_code:-0},
-  "output": $(echo "$output" | jq -Rs '.')
-}
-EOF
+        local result_status
+        result_status=$([ $status -eq 0 ] && echo "passed" || echo "failed")
+        jq -nc \
+            --arg tool "$tool_name" \
+            --arg result_status "$result_status" \
+            --arg platform "$platform" \
+            --argjson found_asset "$found_asset" \
+            --argjson exit_code "${exit_code:-0}" \
+            --arg output "$output" \
+            '{
+                tool: $tool,
+                status: $result_status,
+                platform: $platform,
+                found_asset: $found_asset,
+                exit_code: $exit_code,
+                output: $output
+            }'
         return $status
     else
         # All tools
