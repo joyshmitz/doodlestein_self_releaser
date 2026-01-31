@@ -17,10 +17,10 @@
 
 set -uo pipefail
 
-# XDG directories with defaults
-DSR_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dsr"
-DSR_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dsr"
-DSR_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/dsr"
+# XDG directories with defaults (respect existing env vars for testing)
+DSR_CONFIG_DIR="${DSR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/dsr}"
+DSR_CACHE_DIR="${DSR_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/dsr}"
+DSR_STATE_DIR="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
 
 # Config file paths
 DSR_CONFIG_FILE="${DSR_CONFIG_FILE:-$DSR_CONFIG_DIR/config.yaml}"

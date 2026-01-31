@@ -61,6 +61,7 @@ source "$SCRIPT_DIR/src/canary.sh"
 source "$SCRIPT_DIR/src/upgrade_verify.sh"
 source "$SCRIPT_DIR/src/sbom.sh"
 source "$SCRIPT_DIR/src/slsa.sh"
+source "$SCRIPT_DIR/src/docker.sh"
 
 # Global flags
 JSON_MODE=false
@@ -102,6 +103,7 @@ COMMANDS:
     canary      Test installers in Docker containers
     sbom        Generate Software Bill of Materials
     slsa        Generate SLSA provenance attestation
+    docker      Build multi-arch Docker images
     verify      Verification commands (upgrade checks)
 
 GLOBAL OPTIONS:
@@ -3721,14 +3723,15 @@ _goreleaser_render_template() {
     local binary="$7"
 
     local rendered="$template"
+    # Note: In sed -E, curly braces are special (quantifiers), so escape them
     rendered=$(echo "$rendered" | sed -E \
-        -e "s/{{[^}]*\\.ProjectName[^}]*}}/$project_name/g" \
-        -e "s/{{[^}]*\\.Binary[^}]*}}/$binary/g" \
-        -e "s/{{[^}]*\\.Version[^}]*}}/$version/g" \
-        -e "s/{{[^}]*\\.Os[^}]*}}/$os/g" \
-        -e "s/{{[^}]*\\.Arch[^}]*}}/$arch/g" \
-        -e "s/{{[^}]*\\.Arm[^}]*}}//g" \
-        -e "s/{{[^}]*\\.Ext[^}]*}}/$ext/g")
+        -e "s/\{\{[^}]*\.ProjectName[^}]*\}\}/$project_name/g" \
+        -e "s/\{\{[^}]*\.Binary[^}]*\}\}/$binary/g" \
+        -e "s/\{\{[^}]*\.Version[^}]*\}\}/$version/g" \
+        -e "s/\{\{[^}]*\.Os[^}]*\}\}/$os/g" \
+        -e "s/\{\{[^}]*\.Arch[^}]*\}\}/$arch/g" \
+        -e "s/\{\{[^}]*\.Arm[^}]*\}\}//g" \
+        -e "s/\{\{[^}]*\.Ext[^}]*\}\}/$ext/g")
 
     echo "$rendered"
 }
@@ -5821,6 +5824,268 @@ _slsa_verify() {
 }
 
 # ============================================================================
+# DOCKER SUBCOMMAND
+# ============================================================================
+
+cmd_docker() {
+    local subcmd="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$subcmd" in
+        build)
+            _docker_build "$@"
+            ;;
+        release)
+            _docker_release "$@"
+            ;;
+        sign)
+            _docker_sign "$@"
+            ;;
+        setup)
+            _docker_setup "$@"
+            ;;
+        --help|-h|help|"")
+            cat << 'EOF'
+dsr docker - Multi-arch Docker image building
+
+USAGE:
+    dsr docker build <tool> <version> [options]
+    dsr docker release <tool> <version> [options]
+    dsr docker sign <image>
+    dsr docker setup
+
+SUBCOMMANDS:
+    build     Build multi-arch Docker image
+    release   Build, push, sign, and attest image
+    sign      Sign container with cosign (keyless)
+    setup     Setup buildx builder
+
+OPTIONS:
+    --push              Push to GHCR after build
+    --local             Build for local platform only
+    -p, --platform      Platforms (default: linux/amd64,linux/arm64)
+    --skip-sign         Skip cosign signing (release only)
+    -n, --dry-run       Show what would be done
+
+DESCRIPTION:
+    Builds and publishes multi-architecture Docker images for tools
+    that support containerization. Uses docker buildx for cross-platform
+    builds and cosign for keyless signing.
+
+    Containerized tools: ubs, mcp_agent_mail, process_triage
+
+EXAMPLES:
+    dsr docker build ubs v1.2.3              # Build multi-arch
+    dsr docker build ubs v1.2.3 --push       # Build and push
+    dsr docker release ubs v1.2.3            # Full release workflow
+    dsr docker sign ghcr.io/dicklesworthstone/ubs:v1.2.3
+
+EXIT CODES:
+    0  - Success
+    1  - Build/operation failed
+    3  - Dependency error (docker/buildx/cosign)
+    4  - Invalid arguments
+    7  - No Dockerfile found
+EOF
+            return 0
+            ;;
+        *)
+            log_error "Unknown docker subcommand: $subcmd"
+            log_info "Run 'dsr docker --help' for usage"
+            return 4
+            ;;
+    esac
+}
+
+_docker_build() {
+    local tool=""
+    local version=""
+    local push=false
+    local local_only=false
+    local platforms=""
+    local dry_run=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --push) push=true; shift ;;
+            --local) local_only=true; shift ;;
+            --platform|-p) platforms="$2"; shift 2 ;;
+            --dry-run|-n) dry_run=true; shift ;;
+            --help|-h) docker_build --help; return 0 ;;
+            -*) log_error "Unknown option: $1"; return 4 ;;
+            *)
+                if [[ -z "$tool" ]]; then
+                    tool="$1"
+                elif [[ -z "$version" ]]; then
+                    version="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$tool" || -z "$version" ]]; then
+        log_error "Tool and version required"
+        log_info "Usage: dsr docker build <tool> <version>"
+        return 4
+    fi
+
+    local start_time
+    start_time=$(date +%s)
+
+    local args=(--tool "$tool" --version "$version")
+    $push && args+=(--push)
+    $local_only && args+=(--local)
+    [[ -n "$platforms" ]] && args+=(--platform "$platforms")
+    $dry_run && args+=(--dry-run)
+
+    if docker_build "${args[@]}"; then
+        local duration=$(($(date +%s) - start_time))
+        if $JSON_MODE; then
+            local image="$DOCKER_REGISTRY/$tool:v${version#v}"
+            json_envelope "docker-build" "ok" 0 "$(jq -nc \
+                --arg tool "$tool" \
+                --arg version "$version" \
+                --arg image "$image" \
+                --argjson pushed "$push" \
+                --argjson duration "$duration" \
+                '{tool: $tool, version: $version, image: $image, pushed: $pushed, duration_seconds: $duration}')"
+        fi
+        return 0
+    else
+        local exit_code=$?
+        local duration=$(($(date +%s) - start_time))
+        if $JSON_MODE; then
+            json_envelope "docker-build" "error" "$exit_code" "$(jq -nc \
+                --arg tool "$tool" \
+                --arg version "$version" \
+                --argjson duration "$duration" \
+                '{tool: $tool, version: $version, duration_seconds: $duration}')"
+        fi
+        return $exit_code
+    fi
+}
+
+_docker_release() {
+    local tool=""
+    local version=""
+    local skip_sign=false
+    local dry_run=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --skip-sign) skip_sign=true; shift ;;
+            --dry-run|-n) dry_run=true; shift ;;
+            --help|-h) docker_release --help; return 0 ;;
+            -*) log_error "Unknown option: $1"; return 4 ;;
+            *)
+                if [[ -z "$tool" ]]; then
+                    tool="$1"
+                elif [[ -z "$version" ]]; then
+                    version="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$tool" || -z "$version" ]]; then
+        log_error "Tool and version required"
+        log_info "Usage: dsr docker release <tool> <version>"
+        return 4
+    fi
+
+    local start_time
+    start_time=$(date +%s)
+
+    local args=(--tool "$tool" --version "$version")
+    $skip_sign && args+=(--skip-sign)
+    $dry_run && args+=(--dry-run)
+
+    if docker_release "${args[@]}"; then
+        local duration=$(($(date +%s) - start_time))
+        if $JSON_MODE; then
+            local image="$DOCKER_REGISTRY/$tool:v${version#v}"
+            json_envelope "docker-release" "ok" 0 "$(jq -nc \
+                --arg tool "$tool" \
+                --arg version "$version" \
+                --arg image "$image" \
+                --argjson duration "$duration" \
+                '{tool: $tool, version: $version, image: $image, duration_seconds: $duration}')"
+        fi
+        return 0
+    else
+        local exit_code=$?
+        local duration=$(($(date +%s) - start_time))
+        if $JSON_MODE; then
+            json_envelope "docker-release" "error" "$exit_code" "$(jq -nc \
+                --arg tool "$tool" \
+                --arg version "$version" \
+                --argjson duration "$duration" \
+                '{tool: $tool, version: $version, duration_seconds: $duration}')"
+        fi
+        return $exit_code
+    fi
+}
+
+_docker_sign() {
+    local image=""
+    local dry_run=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run|-n) dry_run=true; shift ;;
+            --help|-h) docker_sign --help; return 0 ;;
+            -*)
+                log_error "Unknown option: $1"
+                return 4
+                ;;
+            *)
+                [[ -z "$image" ]] && image="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$image" ]]; then
+        log_error "Image reference required"
+        log_info "Usage: dsr docker sign <image>"
+        return 4
+    fi
+
+    local args=("$image")
+    $dry_run && args+=(--dry-run)
+
+    if docker_sign "${args[@]}"; then
+        if $JSON_MODE; then
+            json_envelope "docker-sign" "ok" 0 "$(jq -nc --arg image "$image" '{image: $image, signed: true}')"
+        fi
+        return 0
+    else
+        local exit_code=$?
+        if $JSON_MODE; then
+            json_envelope "docker-sign" "error" "$exit_code" "$(jq -nc --arg image "$image" '{image: $image, signed: false}')"
+        fi
+        return $exit_code
+    fi
+}
+
+_docker_setup() {
+    if docker_setup_buildx; then
+        if $JSON_MODE; then
+            json_envelope "docker-setup" "ok" 0 "$(jq -nc --arg builder "$DOCKER_BUILDER_NAME" '{builder: $builder, ready: true}')"
+        fi
+        return 0
+    else
+        local exit_code=$?
+        if $JSON_MODE; then
+            json_envelope "docker-setup" "error" "$exit_code" '{"ready": false}'
+        fi
+        return $exit_code
+    fi
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -5949,6 +6214,9 @@ main() {
             ;;
         slsa)
             cmd_slsa "$@"
+            ;;
+        docker)
+            cmd_docker "$@"
             ;;
         verify)
             cmd_verify "$@"
