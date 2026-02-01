@@ -517,6 +517,7 @@ act_get_flags() {
         .[] |
         .key as $k |
         (if (.value | type) == "array" then .value[] else .value end) |
+        select(. != null and . != "") |
         "\($k):\(. | tostring)"
     ' "$config_file" 2>/dev/null)
     if [[ -n "$matrix_entries" ]]; then
