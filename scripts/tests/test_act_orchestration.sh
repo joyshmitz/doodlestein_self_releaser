@@ -80,6 +80,10 @@ act_job_map:
   linux/amd64: build
   darwin/arm64: null
   windows/amd64: null
+act_matrix:
+  "linux/amd64":
+    os: ubuntu-latest
+    target: linux/amd64
 env:
   CGO_ENABLED: "0"
 cross_compile:
@@ -134,6 +138,16 @@ if [[ "$local_path" == "/tmp/testool" ]]; then
     pass "act_get_local_path returns correct path"
 else
     fail "act_get_local_path returned: $local_path"
+fi
+
+echo ""
+echo "== act_get_flags (matrix) =="
+
+flags=$(act_get_flags "testool" "linux/amd64")
+if [[ "$flags" == *"--matrix os:ubuntu-latest"* ]] && [[ "$flags" == *"--matrix target:linux/amd64"* ]]; then
+    pass "act_get_flags includes matrix filters"
+else
+    fail "act_get_flags missing matrix filters: $flags"
 fi
 
 echo ""

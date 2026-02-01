@@ -36,6 +36,12 @@ act_job_map:
   darwin/amd64: null              # native on mmini (or cross-compile)
   windows/amd64: null             # native on wlap (or cross-compile)
 
+# Optional: matrix filters for act when a job uses a build matrix
+act_matrix:
+  "linux/amd64":
+    os: ubuntu-latest
+    target: linux/amd64
+
 # Cross-compilation (Go makes this easy)
 cross_compile:
   linux/arm64:

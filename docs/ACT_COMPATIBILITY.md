@@ -135,6 +135,7 @@ native_build:
 | `-W <workflow>` | Specify workflow file | `-W .github/workflows/release.yml` |
 | `--artifact-server-path` | Artifact output | `--artifact-server-path /tmp/artifacts` |
 | `-P ubuntu-latest=catthehacker/ubuntu:act-latest` | Custom image | Platform override |
+| `--matrix key:value` | Filter job matrix to a specific value | `--matrix os:ubuntu-latest --matrix target:linux/amd64` |
 | `--env-file` | Environment variables | `--env-file .env.act` |
 | `-s GITHUB_TOKEN` | Pass secrets | `-s GITHUB_TOKEN` |
 | `-e <event.json>` | Event payload | `-e event.json` |
@@ -173,6 +174,20 @@ jobs:
     runs-on: windows-latest
     # ... (requires native)
 ```
+
+### Matrix Filtering for Targeted Builds
+
+If your release job uses a build matrix (single job with multiple platform entries), dsr can
+filter the matrix values it passes to act. Add `act_matrix` per target in your repo config:
+
+```yaml
+act_matrix:
+  "linux/amd64":
+    os: ubuntu-latest
+    target: linux/amd64
+```
+
+dsr will pass each key/value as `--matrix key:value` when invoking act for that target.
 
 ### Detecting act Environment
 
