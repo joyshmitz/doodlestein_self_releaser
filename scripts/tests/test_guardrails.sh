@@ -86,6 +86,7 @@ test_resolve_path_tilde_subdir() {
   ((TESTS_RUN++))
 
   local result
+  # shellcheck disable=SC2088  # Testing that resolve_path handles literal tilde
   result=$(resolve_path "~/test/path")
 
   if [[ "$result" == "$HOME/test/path" ]]; then
@@ -162,7 +163,8 @@ test_safe_rm_under_tmp() {
   ((TESTS_RUN++))
 
   # Create a file explicitly under /tmp (not TMPDIR which may be elsewhere)
-  local test_file="/tmp/dsr_test_$$_$(date +%s).txt"
+  local test_file
+  test_file="/tmp/dsr_test_$$_$(date +%s).txt"
   echo "test" > "$test_file"
 
   if safe_rm "$test_file" && [[ ! -f "$test_file" ]]; then

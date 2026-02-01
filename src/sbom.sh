@@ -139,12 +139,11 @@ sbom_generate() {
         esac
     fi
 
-    local syft_output exit_code=0
+    local syft_output
     if syft_output=$(syft "${syft_args[@]}" 2>&1); then
         echo "$syft_output" > "$output"
         $quiet || log_ok "SBOM generated: $output"
     else
-        exit_code=$?
         log_error "SBOM generation failed: $syft_output"
         return 1
     fi

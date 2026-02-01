@@ -747,13 +747,29 @@ act_run_native_build() {
 
     # Construct the remote command
     # For SSH, we need to cd to repo, set env vars, and run build
-    local env_exports=""
-    for env_pair in $build_env; do
-        env_exports+="export $env_pair; "
-    done
-
-    # Use remote_path instead of local_path
-    local remote_cmd="cd '${remote_path//\'/\'\\\'\'}' && $env_exports$build_cmd"
+    local remote_cmd
+    if [[ "$platform" == windows/* ]]; then
+        # Windows: use cmd.exe compatible syntax
+        # - Use double quotes for paths
+        # - Use 'set' instead of 'export' for env vars
+        # - Use '&&' which works in cmd.exe
+        # Note: In cmd.exe, 'set VAR=value && ...' includes trailing space in value.
+        # Using 'set "VAR=value"' protects the value from the space before &&.
+        local env_exports=""
+        for env_pair in $build_env; do
+            env_exports+="set \"$env_pair\" && "
+        done
+        # Convert forward slashes to backslashes for Windows paths
+        local win_path="${remote_path//\//\\}"
+        remote_cmd="cd /d \"${win_path}\" && ${env_exports}${build_cmd}"
+    else
+        # Unix: use bash/zsh compatible syntax
+        local env_exports=""
+        for env_pair in $build_env; do
+            env_exports+="export $env_pair; "
+        done
+        remote_cmd="cd '${remote_path//\'/\'\\\'\'}' && $env_exports$build_cmd"
+    fi
 
     # Execute on remote host
     # Use PIPESTATUS to capture the actual command exit code, not tee's
@@ -785,8 +801,13 @@ act_run_native_build() {
                 ;;
         esac
 
-        # Add .exe extension for Windows
-        [[ "$platform" == windows/* ]] && remote_artifact_path+=".exe"
+        # Handle Windows specifics
+        if [[ "$platform" == windows/* ]]; then
+            # Convert forward slashes to backslashes for Windows
+            remote_artifact_path="${remote_artifact_path//\//\\}"
+            # Add .exe extension
+            remote_artifact_path+=".exe"
+        fi
 
         # SCP artifact back to local machine
         # Use run_id if available to group artifacts
@@ -799,7 +820,7 @@ act_run_native_build() {
         _log_info "Downloading artifact from $host..."
         if scp -o ConnectTimeout="$_ACT_SSH_TIMEOUT" \
                -o StrictHostKeyChecking=accept-new \
-               "$host":"'$remote_artifact_path'" "$local_artifact_path" >> "$log_file" 2>&1; then
+               "${host}:${remote_artifact_path}" "$local_artifact_path" >> "$log_file" 2>&1; then
             _log_ok "Artifact downloaded: $local_artifact_path"
         else
             _log_error "Failed to download artifact from $host"

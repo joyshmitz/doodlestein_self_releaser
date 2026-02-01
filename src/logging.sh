@@ -47,7 +47,8 @@ fi
 
 # Generate run ID if not set
 # Format: run-<epoch_seconds>-<pid>
-: "${DSR_RUN_ID:="run-$(date +%s)-$$"}"
+# Optimization: Use EPOCHSECONDS builtin (Bash 5+) to avoid date subshell
+: "${DSR_RUN_ID:="run-${EPOCHSECONDS:-$(date +%s)}-$$"}"
 
 # Current command context (set by main script)
 DSR_CURRENT_CMD="${DSR_CURRENT_CMD:-}"
@@ -83,12 +84,24 @@ log_init() {
     mv -f "$tmp_link" "$log_root/latest" 2>/dev/null || true
   fi
 
-  # Rotate logs: compress logs older than 7 days
-  find "$log_root" -type f -name '*.log' -mtime +7 ! -name '*.gz' \
-    -exec gzip -q {} \; 2>/dev/null || true
+  # Log rotation: only run once per day (marker file prevents repeated find calls)
+  # This optimization avoids expensive find operations on every command
+  local rotation_marker="$log_root/.rotated-$log_date"
+  if [[ ! -f "$rotation_marker" ]]; then
+    # Rotate logs: compress logs older than 7 days
+    find "$log_root" -type f -name '*.log' -mtime +7 ! -name '*.gz' \
+      -exec gzip -q {} \; 2>/dev/null || true
 
-  # Delete logs older than 30 days
-  find "$log_root" -type f -name '*.log*' -mtime +30 -delete 2>/dev/null || true
+    # Delete logs older than 30 days
+    find "$log_root" -type f -name '*.log*' -mtime +30 -delete 2>/dev/null || true
+
+    # Create marker to skip rotation for rest of day
+    touch "$rotation_marker" 2>/dev/null || true
+
+    # Clean up old rotation markers (keep only today's)
+    find "$log_root" -maxdepth 1 -name '.rotated-*' ! -name ".rotated-$log_date" \
+      -delete 2>/dev/null || true
+  fi
 
   # Log session start
   _log info "Session started" "\"pid\":$$"
@@ -102,16 +115,29 @@ _should_log() {
   [[ "$level_num" -le "$current_num" ]]
 }
 
-# Escape string for JSON
+# Escape string for JSON (two variants for different call patterns)
+# _json_escape_var: stores result in variable named by $2 (no subshell, faster)
+# _json_escape: returns on stdout (for legacy/simple cases)
+_json_escape_var() {
+  local _s="$1"
+  local _var="$2"
+  # Escape backslashes, quotes, and control characters
+  _s="${_s//\\/\\\\}"
+  _s="${_s//\"/\\\"}"
+  _s="${_s//$'\n'/\\n}"
+  _s="${_s//$'\r'/\\r}"
+  _s="${_s//$'\t'/\\t}"
+  printf -v "$_var" '%s' "$_s"
+}
+
 _json_escape() {
   local s="$1"
-  # Escape backslashes, quotes, and control characters
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
   s="${s//$'\n'/\\n}"
   s="${s//$'\r'/\\r}"
   s="${s//$'\t'/\\t}"
-  echo -n "$s"
+  printf '%s' "$s"
 }
 
 # Core log function
@@ -128,10 +154,11 @@ _log() {
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
   # Build JSON log entry with proper escaping for all fields
+  # Use _json_escape_var to avoid subshell overhead (5 fewer forks per log call)
   local escaped_msg escaped_run_id escaped_cmd escaped_tool escaped_host
-  escaped_msg="$(_json_escape "$msg")"
-  escaped_run_id="$(_json_escape "$DSR_RUN_ID")"
-  escaped_cmd="$(_json_escape "${DSR_CURRENT_CMD:-}")"
+  _json_escape_var "$msg" escaped_msg
+  _json_escape_var "$DSR_RUN_ID" escaped_run_id
+  _json_escape_var "${DSR_CURRENT_CMD:-}" escaped_cmd
 
   local json="{"
   json+="\"ts\":\"$ts\","
@@ -142,11 +169,11 @@ _log() {
 
   # Add optional context fields with escaping
   if [[ -n "${DSR_CURRENT_TOOL:-}" ]]; then
-    escaped_tool="$(_json_escape "$DSR_CURRENT_TOOL")"
+    _json_escape_var "$DSR_CURRENT_TOOL" escaped_tool
     json+=",\"tool\":\"$escaped_tool\""
   fi
   if [[ -n "${DSR_CURRENT_HOST:-}" ]]; then
-    escaped_host="$(_json_escape "$DSR_CURRENT_HOST")"
+    _json_escape_var "$DSR_CURRENT_HOST" escaped_host
     json+=",\"host\":\"$escaped_host\""
   fi
 
@@ -181,28 +208,45 @@ log_debug() { _log debug "$1" "${2:-}"; }
 # Log success (alias for info with success indicator)
 log_ok() { _log info "$1" "${2:-}"; }
 
+# Millisecond timestamp method (cached on first call)
+# Values: "date_ms" | "python" | "date_sec"
+_DSR_MS_TIMESTAMP_METHOD=""
+
+# Get milliseconds timestamp (optimized: date +%s%3N >> python3)
+# Usage: _get_ms_timestamp
+# Returns: Milliseconds since epoch on stdout
+_get_ms_timestamp() {
+  # Cache the detection result to avoid repeated checks
+  if [[ -z "$_DSR_MS_TIMESTAMP_METHOD" ]]; then
+    if date +%s%3N &>/dev/null; then
+      _DSR_MS_TIMESTAMP_METHOD="date_ms"
+    elif command -v python3 &>/dev/null; then
+      _DSR_MS_TIMESTAMP_METHOD="python"
+    else
+      _DSR_MS_TIMESTAMP_METHOD="date_sec"
+    fi
+  fi
+
+  case "$_DSR_MS_TIMESTAMP_METHOD" in
+    date_ms)  date +%s%3N ;;
+    python)   python3 -c 'import time; print(int(time.time() * 1000))' ;;
+    date_sec) echo "$(($(date +%s) * 1000))" ;;
+  esac
+}
+
 # Log with duration tracking
 # Executes command and logs completion with duration and exit code
 # Usage: log_timed command arg1 arg2 ...
 log_timed() {
   local start_ms
-  # Get milliseconds if possible, fall back to seconds
-  if command -v python3 &>/dev/null; then
-    start_ms=$(python3 -c 'import time; print(int(time.time() * 1000))')
-  else
-    start_ms=$(($(date +%s) * 1000))
-  fi
+  start_ms=$(_get_ms_timestamp)
 
   # Run the command
   local exit_code=0
   "$@" || exit_code=$?
 
   local end_ms
-  if command -v python3 &>/dev/null; then
-    end_ms=$(python3 -c 'import time; print(int(time.time() * 1000))')
-  else
-    end_ms=$(($(date +%s) * 1000))
-  fi
+  end_ms=$(_get_ms_timestamp)
 
   local duration_ms=$((end_ms - start_ms))
 
@@ -263,6 +307,6 @@ log_get_run_id() {
 export -f log_init log_error log_warn log_info log_debug log_ok log_timed
 export -f log_set_level_from_flags log_set_command log_set_tool log_set_host
 export -f log_clear_context log_get_file log_get_run_id
-export -f _log _should_log _json_escape
-export DSR_RUN_ID LOG_LEVEL LOG_FILE
+export -f _log _should_log _json_escape _json_escape_var _get_ms_timestamp
+export DSR_RUN_ID LOG_LEVEL LOG_FILE _DSR_MS_TIMESTAMP_METHOD
 export DSR_CURRENT_CMD DSR_CURRENT_TOOL DSR_CURRENT_HOST

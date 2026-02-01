@@ -297,18 +297,18 @@ color() {
   local name="$1"
 
   if is_color_disabled; then
-    echo -n ""
+    printf ''
     return
   fi
 
   case "$name" in
-    red)    echo -n $'\033[0;31m' ;;
-    green)  echo -n $'\033[0;32m' ;;
-    yellow) echo -n $'\033[0;33m' ;;
-    blue)   echo -n $'\033[0;34m' ;;
-    gray)   echo -n $'\033[0;90m' ;;
-    reset)  echo -n $'\033[0m' ;;
-    *)      echo -n "" ;;
+    red)    printf '\033[0;31m' ;;
+    green)  printf '\033[0;32m' ;;
+    yellow) printf '\033[0;33m' ;;
+    blue)   printf '\033[0;34m' ;;
+    gray)   printf '\033[0;90m' ;;
+    reset)  printf '\033[0m' ;;
+    *)      printf '' ;;
   esac
 }
 

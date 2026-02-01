@@ -256,8 +256,10 @@ test_load_signing_disabled_by_env() {
 
 test_load_resets_config() {
   config_load
+  # shellcheck disable=SC2154  # test_key is a literal associative array key, not a variable
   DSR_CONFIG[test_key]="test_value"
   config_load  # Should reset
+  # shellcheck disable=SC2154
   [[ -z "${DSR_CONFIG[test_key]:-}" ]]
 }
 

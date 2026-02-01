@@ -39,7 +39,8 @@ source "$SCRIPT_DIR/src/act_runner.sh"
 ACT_REPOS_DIR="$DSR_CONFIG_DIR/repos.d"
 
 # Initialize logging (suppress output)
-export LOG_LEVEL=0  # shellcheck: used by logging.sh
+# Note: LOG_LEVEL is used by logging.sh
+export LOG_LEVEL=0
 log_init >/dev/null 2>&1
 
 echo "═══════════════════════════════════════════════════════════════"

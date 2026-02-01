@@ -91,8 +91,8 @@ scp() {
     SCP_CALLED=true
     LAST_SCP_ARGS="$*"
     # Simulate success by touching the target file if it's an upload/download
-    # Last arg is target
-    local target="${@: -1}"
+    # Last arg is target - use ${!#} for last positional parameter
+    local target="${!#}"
     touch "$target"
     return 0
 }
@@ -102,6 +102,7 @@ setup() {
     # Create mock config file
     touch "$ACT_REPOS_DIR/tool.yaml"
     SCP_CALLED=false
+    # shellcheck disable=SC2034  # SSH_CALLED used for test assertions
     SSH_CALLED=false
     LAST_SCP_ARGS=""
     LAST_SSH_ARGS=""

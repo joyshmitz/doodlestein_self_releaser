@@ -107,13 +107,13 @@ _discover_shell_tests() {
             local name
             name=$(basename "$file")
 
-            # Apply filter
-            if [[ -n "$_FILTER" && ! "$name" == $_FILTER ]]; then
+            # Apply filter (quoted to prevent glob matching)
+            if [[ -n "$_FILTER" && ! "$name" == "$_FILTER" ]]; then
                 continue
             fi
 
-            # Apply exclude
-            if [[ -n "$_EXCLUDE" && "$name" == $_EXCLUDE ]]; then
+            # Apply exclude (quoted to prevent glob matching)
+            if [[ -n "$_EXCLUDE" && "$name" == "$_EXCLUDE" ]]; then
                 continue
             fi
 
@@ -133,13 +133,13 @@ _discover_bats_tests() {
             local name
             name=$(basename "$file")
 
-            # Apply filter
-            if [[ -n "$_FILTER" && ! "$name" == $_FILTER ]]; then
+            # Apply filter (quoted to prevent glob matching)
+            if [[ -n "$_FILTER" && ! "$name" == "$_FILTER" ]]; then
                 continue
             fi
 
-            # Apply exclude
-            if [[ -n "$_EXCLUDE" && "$name" == $_EXCLUDE ]]; then
+            # Apply exclude (quoted to prevent glob matching)
+            if [[ -n "$_EXCLUDE" && "$name" == "$_EXCLUDE" ]]; then
                 continue
             fi
 

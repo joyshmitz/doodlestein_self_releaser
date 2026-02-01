@@ -45,7 +45,7 @@ test_log_init() {
 # Test: log_info writes to file
 test_log_info_writes_file() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"  # Clear log file
+    : > "$DSR_LOG_FILE"  # Clear log file
     log_info "Test message" 2>/dev/null
     if grep -q '"Test message"' "$DSR_LOG_FILE"; then
         pass "log_info writes to file"
@@ -57,7 +57,7 @@ test_log_info_writes_file() {
 # Test: log_error writes to file
 test_log_error_writes_file() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"
+    : > "$DSR_LOG_FILE"
     log_error "Error message" 2>/dev/null
     if grep -q '"level":"error"' "$DSR_LOG_FILE"; then
         pass "log_error sets level to error"
@@ -69,7 +69,7 @@ test_log_error_writes_file() {
 # Test: log contains run_id
 test_log_contains_run_id() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"
+    : > "$DSR_LOG_FILE"
     log_info "Check run_id" 2>/dev/null
     if grep -q '"run_id":"test-run-12345"' "$DSR_LOG_FILE"; then
         pass "log contains run_id"
@@ -81,7 +81,7 @@ test_log_contains_run_id() {
 # Test: log contains timestamp
 test_log_contains_timestamp() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"
+    : > "$DSR_LOG_FILE"
     log_info "Check timestamp" 2>/dev/null
     if grep -qE '"ts":"[0-9]{4}-[0-9]{2}-[0-9]{2}T' "$DSR_LOG_FILE"; then
         pass "log contains ISO8601 timestamp"
@@ -93,7 +93,7 @@ test_log_contains_timestamp() {
 # Test: extra JSON fields
 test_log_extra_fields() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"
+    : > "$DSR_LOG_FILE"
     log_info "With extra" '"custom_key":"custom_value"' 2>/dev/null
     if grep -q '"custom_key":"custom_value"' "$DSR_LOG_FILE"; then
         pass "log accepts extra JSON fields"
@@ -105,7 +105,7 @@ test_log_extra_fields() {
 # Test: log_set_command sets context
 test_log_set_command() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"
+    : > "$DSR_LOG_FILE"
     log_set_command "build"
     log_info "Command context" 2>/dev/null
     if grep -q '"cmd":"build"' "$DSR_LOG_FILE"; then
@@ -118,7 +118,7 @@ test_log_set_command() {
 # Test: log_set_tool sets context
 test_log_set_tool() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"
+    : > "$DSR_LOG_FILE"
     log_set_tool "ntm"
     log_info "Tool context" 2>/dev/null
     if grep -q '"tool":"ntm"' "$DSR_LOG_FILE"; then
@@ -131,9 +131,10 @@ test_log_set_tool() {
 # Test: quiet mode suppresses info
 test_quiet_mode() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"
+    : > "$DSR_LOG_FILE"
     LOG_LEVEL="error"
     log_info "Should not appear" 2>/dev/null
+    # shellcheck disable=SC2034  # LOG_LEVEL is used by sourced logging.sh
     LOG_LEVEL="debug"  # Reset
     if ! grep -q "Should not appear" "$DSR_LOG_FILE"; then
         pass "quiet mode suppresses info"
@@ -145,7 +146,7 @@ test_quiet_mode() {
 # Test: JSON escaping
 test_json_escape() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"
+    : > "$DSR_LOG_FILE"
     log_info 'Message with "quotes" and \backslash' 2>/dev/null
     if jq . "$DSR_LOG_FILE" >/dev/null 2>&1; then
         pass "log output is valid JSON"
@@ -169,7 +170,7 @@ test_log_get_run_id() {
 # Test: log_timed captures duration
 test_log_timed() {
     ((TESTS_RUN++))
-    > "$DSR_LOG_FILE"
+    : > "$DSR_LOG_FILE"
     log_timed sleep 0.1 2>/dev/null
     if grep -qE '"duration_ms":[0-9]+' "$DSR_LOG_FILE"; then
         pass "log_timed captures duration_ms"

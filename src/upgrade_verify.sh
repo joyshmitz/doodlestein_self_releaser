@@ -33,10 +33,11 @@ upgrade_verify_tool() {
     local tool_name="${1:-}"
     shift 2>/dev/null || true
 
-    local version=""
+    local version=""  # Reserved for future use (assigned but not yet read)
     local build_from_source=false
     local dry_run=false
 
+    # shellcheck disable=SC2034  # version is reserved for future use
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --version|-V) version="$2"; shift 2 ;;
@@ -243,7 +244,7 @@ upgrade_verify_json() {
         esac
     done
 
-    local result status=0
+    local status=0
     local output exit_code platform
 
     platform="$(uname -s | tr '[:upper:]' '[:lower:]')/$(uname -m)"

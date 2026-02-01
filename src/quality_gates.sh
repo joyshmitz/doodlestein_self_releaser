@@ -69,11 +69,12 @@ _qg_run_single_check() {
 
     local start_ms end_ms duration_ms exit_code=0 output=""
 
-    # Get start time
-    if command -v python3 &>/dev/null; then
-        start_ms=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    # Get start time (use logging module helper if available)
+    if declare -f _get_ms_timestamp &>/dev/null; then
+        start_ms=$(_get_ms_timestamp)
     else
-        start_ms=$(($(date +%s) * 1000))
+        # Fallback: prefer date +%s%3N if supported
+        start_ms=$(date +%s%3N 2>/dev/null || echo "$(($(date +%s) * 1000))")
     fi
 
     if [[ "$dry_run" == "true" ]]; then
@@ -91,11 +92,12 @@ _qg_run_single_check() {
         fi
     fi
 
-    # Get end time
-    if command -v python3 &>/dev/null; then
-        end_ms=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    # Get end time (use logging module helper if available)
+    if declare -f _get_ms_timestamp &>/dev/null; then
+        end_ms=$(_get_ms_timestamp)
     else
-        end_ms=$(($(date +%s) * 1000))
+        # Fallback: prefer date +%s%3N if supported
+        end_ms=$(date +%s%3N 2>/dev/null || echo "$(($(date +%s) * 1000))")
     fi
 
     duration_ms=$((end_ms - start_ms))
@@ -233,10 +235,10 @@ EOF
     local total_start_ms total_end_ms
     local passed=0 failed=0
 
-    if command -v python3 &>/dev/null; then
-        total_start_ms=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    if declare -f _get_ms_timestamp &>/dev/null; then
+        total_start_ms=$(_get_ms_timestamp)
     else
-        total_start_ms=$(($(date +%s) * 1000))
+        total_start_ms=$(date +%s%3N 2>/dev/null || echo "$(($(date +%s) * 1000))")
     fi
 
     while IFS= read -r cmd; do
@@ -255,10 +257,10 @@ EOF
         fi
     done < <(echo "$checks" | jq -r '.[]')
 
-    if command -v python3 &>/dev/null; then
-        total_end_ms=$(python3 -c 'import time; print(int(time.time() * 1000))')
+    if declare -f _get_ms_timestamp &>/dev/null; then
+        total_end_ms=$(_get_ms_timestamp)
     else
-        total_end_ms=$(($(date +%s) * 1000))
+        total_end_ms=$(date +%s%3N 2>/dev/null || echo "$(($(date +%s) * 1000))")
     fi
 
     local total_duration_ms=$((total_end_ms - total_start_ms))

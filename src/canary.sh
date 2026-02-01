@@ -121,6 +121,7 @@ canary_run_test() {
     # Prepare test directory
     local tmpdir
     tmpdir=$(mktemp -d)
+    # shellcheck disable=SC2064  # We want $tmpdir expanded now, at trap definition time
     trap "rm -rf '$tmpdir'" RETURN
 
     # Create test script
@@ -218,7 +219,8 @@ DOCKERFILE
     fi
 
     # Build and run
-    local tag="dsr-canary-$tool-$(echo "$image" | tr ':/' '-')-$(date +%s)"
+    local tag
+    tag="dsr-canary-$tool-$(echo "$image" | tr ':/' '-')-$(date +%s)"
     local output
     local status=0
 

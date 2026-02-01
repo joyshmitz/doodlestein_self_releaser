@@ -33,8 +33,27 @@ set -uo pipefail
 # Version
 DSR_VERSION="0.1.0"
 
-# Script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Script directory (optimized: avoid dirname subshell where possible)
+_dsr_source="${BASH_SOURCE[0]}"
+# Resolve symlinks (portable: try readlink -f, fall back to manual resolution)
+if [[ -L "$_dsr_source" ]]; then
+  if _dsr_source="$(readlink -f "$_dsr_source" 2>/dev/null)"; then
+    : # readlink -f worked (GNU coreutils)
+  else
+    # macOS/BSD fallback: manually resolve symlink chain
+    while [[ -L "$_dsr_source" ]]; do
+      _dsr_dir="${_dsr_source%/*}"
+      [[ "$_dsr_dir" == "$_dsr_source" ]] && _dsr_dir="."
+      _dsr_source="$(cd "$_dsr_dir" && readlink "$_dsr_source")"
+      [[ "$_dsr_source" != /* ]] && _dsr_source="$_dsr_dir/$_dsr_source"
+    done
+    unset _dsr_dir
+  fi
+fi
+SCRIPT_DIR="${_dsr_source%/*}"
+[[ "$SCRIPT_DIR" == "$_dsr_source" ]] && SCRIPT_DIR="."
+SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd)"
+unset _dsr_source
 
 # Source guardrails first for Bash version check
 source "$SCRIPT_DIR/src/guardrails.sh"
@@ -42,26 +61,50 @@ source "$SCRIPT_DIR/src/guardrails.sh"
 # Enforce Bash 4.0+ requirement
 require_bash_4 || exit $?
 
-# Source modules (logging first, others may depend on it)
+# ============================================================================
+# LAZY MODULE LOADING
+# ============================================================================
+# Modules are loaded on-demand to improve startup time for simple commands.
+# Core modules (logging, config) are always loaded; others load when needed.
+
+# Track loaded modules to avoid double-sourcing
+declare -gA _DSR_LOADED_MODULES=()
+
+# Lazy source helper - only loads if not already loaded
+_dsr_require() {
+  local module="$1"
+  [[ -n "${_DSR_LOADED_MODULES[$module]:-}" ]] && return 0
+  # shellcheck source=/dev/null  # Dynamic module loading
+  source "$SCRIPT_DIR/src/${module}.sh"
+  _DSR_LOADED_MODULES[$module]=1
+}
+
+# Core modules (always needed)
 source "$SCRIPT_DIR/src/logging.sh"
+_DSR_LOADED_MODULES[logging]=1
 source "$SCRIPT_DIR/src/config.sh"
-source "$SCRIPT_DIR/src/secrets.sh"
-source "$SCRIPT_DIR/src/notify.sh"
-source "$SCRIPT_DIR/src/signing.sh"
-source "$SCRIPT_DIR/src/github.sh"
-source "$SCRIPT_DIR/src/host_health.sh"
-source "$SCRIPT_DIR/src/host_selector.sh"
-source "$SCRIPT_DIR/src/quality_gates.sh"
-source "$SCRIPT_DIR/src/build_state.sh"
-source "$SCRIPT_DIR/src/git_ops.sh"
-source "$SCRIPT_DIR/src/version.sh"
-source "$SCRIPT_DIR/src/act_runner.sh"
-source "$SCRIPT_DIR/src/release_formulas.sh"
-source "$SCRIPT_DIR/src/canary.sh"
-source "$SCRIPT_DIR/src/upgrade_verify.sh"
-source "$SCRIPT_DIR/src/sbom.sh"
-source "$SCRIPT_DIR/src/slsa.sh"
-source "$SCRIPT_DIR/src/docker.sh"
+_DSR_LOADED_MODULES[config]=1
+
+# Load all modules for commands that need them
+_dsr_load_all_modules() {
+  _dsr_require secrets
+  _dsr_require notify
+  _dsr_require signing
+  _dsr_require github
+  _dsr_require host_health
+  _dsr_require host_selector
+  _dsr_require quality_gates
+  _dsr_require build_state
+  _dsr_require git_ops
+  _dsr_require version
+  _dsr_require act_runner
+  _dsr_require release_formulas
+  _dsr_require canary
+  _dsr_require upgrade_verify
+  _dsr_require sbom
+  _dsr_require slsa
+  _dsr_require docker
+}
 
 # Global flags
 JSON_MODE=false
@@ -1576,14 +1619,16 @@ EOF
     full_output=$(act_orchestrate_build "$tool_name" "$version" $target_list 2>&1)
 
     # Extract JSON from mixed output (orchestrator logs + JSON at end)
-    # The JSON starts with a standalone { line and ends with standalone }
+    # The orchestrator outputs compact JSON on a single line starting with {
+    # Find the last line that starts with { and is valid JSON
     local result
-    result=$(echo "$full_output" | awk '
-        /^{$/ { json = ""; capturing = 1 }
-        capturing { json = json $0 "\n" }
-        /^}$/ && capturing { capturing = 0 }
-        END { printf "%s", json }
-    ')
+    result=$(echo "$full_output" | grep '^{' | tail -1)
+
+    # Validate it's actually JSON
+    if ! echo "$result" | jq -e '.' &>/dev/null; then
+        log_warn "Could not parse orchestrator JSON output"
+        result='{}'
+    fi
 
     # Parse result
     local end_time duration
@@ -4322,12 +4367,11 @@ cmd_health_check() {
         return 4
     fi
 
-    local flags=""
-    $no_cache && flags+=" --no-cache"
-    $JSON_MODE && flags+=" --json"
+    local -a flags=()
+    $no_cache && flags+=("--no-cache")
+    $JSON_MODE && flags+=("--json")
 
-    # shellcheck disable=SC2086  # flags needs word splitting
-    host_health_check "$hostname" $flags
+    host_health_check "$hostname" "${flags[@]}"
 }
 
 cmd_health_all() {
@@ -4340,12 +4384,11 @@ cmd_health_all() {
         esac
     done
 
-    local flags=""
-    $no_cache && flags+=" --no-cache"
-    $JSON_MODE && flags+=" --json"
+    local -a flags=()
+    $no_cache && flags+=("--no-cache")
+    $JSON_MODE && flags+=("--json")
 
-    # shellcheck disable=SC2086  # flags needs word splitting
-    host_health_check_all $flags
+    host_health_check_all "${flags[@]}"
 }
 
 cmd_health_clear_cache() {
@@ -4960,12 +5003,11 @@ cmd_version() {
 
             if $tag_all; then
                 # Tag all configured tools
-                local args=""
-                $push && args+=" --push"
-                $DRY_RUN && args+=" --dry-run"
-                $JSON_MODE && args+=" --json"
-                # shellcheck disable=SC2086
-                version_tag_all $args
+                local -a args=()
+                $push && args+=("--push")
+                $DRY_RUN && args+=("--dry-run")
+                $JSON_MODE && args+=("--json")
+                version_tag_all "${args[@]}"
                 return $?
             fi
 
@@ -4991,12 +5033,11 @@ cmd_version() {
                 return 4
             fi
 
-            local tag_args=""
-            $push && tag_args+=" --push"
-            $DRY_RUN && tag_args+=" --dry-run"
+            local -a tag_args=()
+            $push && tag_args+=("--push")
+            $DRY_RUN && tag_args+=("--dry-run")
 
-            # shellcheck disable=SC2086
-            if version_create_tag "$repo_path" $tag_args; then
+            if version_create_tag "$repo_path" "${tag_args[@]}"; then
                 if $JSON_MODE; then
                     local json_result
                     json_result=$(version_info_json "$repo_path")
@@ -5200,15 +5241,14 @@ _verify_upgrade() {
     local start_time
     start_time=$(date +%s)
 
-    local args=""
-    $build_from_source && args+=" --build-from-source"
-    $dry_run_flag && args+=" --dry-run"
+    local -a args=()
+    $build_from_source && args+=("--build-from-source")
+    $dry_run_flag && args+=("--dry-run")
 
     if $all_tools; then
         log_info "Verifying upgrade command for all tools..."
 
-        # shellcheck disable=SC2086
-        if upgrade_verify_all $args; then
+        if upgrade_verify_all "${args[@]}"; then
             local duration=$(($(date +%s) - start_time))
             if $JSON_MODE; then
                 json_envelope "verify-upgrade" "ok" 0 "{\"mode\": \"all\", \"duration_seconds\": $duration}"
@@ -5232,8 +5272,7 @@ _verify_upgrade() {
         return 4
     fi
 
-    # shellcheck disable=SC2086
-    if upgrade_verify_tool "$tool_name" $args; then
+    if upgrade_verify_tool "$tool_name" "${args[@]}"; then
         local duration=$(($(date +%s) - start_time))
         if $JSON_MODE; then
             local result
@@ -5624,11 +5663,10 @@ _sbom_generate() {
     local start_time
     start_time=$(date +%s)
 
-    local args=""
-    [[ -n "$output" ]] && args+=" --output $output"
+    local -a args=()
+    [[ -n "$output" ]] && args+=("--output" "$output")
 
-    # shellcheck disable=SC2086
-    if result=$(sbom_generate "$target" --format "$format" $args 2>&1); then
+    if result=$(sbom_generate "$target" --format "$format" "${args[@]}" 2>&1); then
         local duration=$(($(date +%s) - start_time))
         if $JSON_MODE; then
             json_envelope "sbom-generate" "ok" 0 "$(jq -nc \
@@ -5759,11 +5797,10 @@ _slsa_generate() {
     local start_time
     start_time=$(date +%s)
 
-    local args=""
-    [[ -n "$output" ]] && args+=" --output $output"
+    local -a args=()
+    [[ -n "$output" ]] && args+=("--output" "$output")
 
-    # shellcheck disable=SC2086
-    if result=$(slsa_generate "$artifact" --builder "$builder_id" $args 2>&1); then
+    if result=$(slsa_generate "$artifact" --builder "$builder_id" "${args[@]}" 2>&1); then
         local duration=$(($(date +%s) - start_time))
         if $JSON_MODE; then
             json_envelope "slsa-generate" "ok" 0 "$(jq -nc \
@@ -6148,6 +6185,21 @@ main() {
 
     # Set command context for logging
     log_set_command "$command"
+
+    # Load modules needed for command execution
+    # Simple commands (config, doctor, help) need fewer modules
+    case "$command" in
+        config)
+            # config only needs core modules (already loaded)
+            ;;
+        doctor|help)
+            # doctor/help only need core modules (logging, config) - already loaded
+            ;;
+        *)
+            # All other commands need full module set
+            _dsr_load_all_modules
+            ;;
+    esac
 
     # Dispatch to command handler
     case "$command" in

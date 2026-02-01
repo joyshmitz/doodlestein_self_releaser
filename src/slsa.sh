@@ -19,6 +19,7 @@
 # ============================================================================
 
 # SLSA specification version
+# shellcheck disable=SC2034  # Reserved for future SLSA versioning
 SLSA_SPEC_VERSION="1.0"
 
 # Builder identity

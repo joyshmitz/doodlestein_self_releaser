@@ -55,6 +55,7 @@ validate_with_ajv() {
 
 validate_with_jq() {
     local fixture="$1"
+    # shellcheck disable=SC2034  # schema_name reserved for future validation logic
     local schema_name="$2"
 
     # Basic structural validation with jq

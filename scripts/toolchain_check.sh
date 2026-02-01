@@ -41,6 +41,7 @@ log_err()  { echo -e "${RED}[error]${NC} $*"; }
 # Get tool version on remote machine
 get_remote_version() {
     local host="$1"
+    # shellcheck disable=SC2034  # tool name kept for logging/debugging reference
     local tool="$2"
     local cmd="$3"
 
@@ -110,6 +111,7 @@ check_bun() {
         version=$(get_remote_version "$host" "bun" 'cmd /c "set PATH=%USERPROFILE%\.bun\bin;%PATH% && bun --version" 2>nul')
     elif [[ "$host" == "mmini" ]]; then
         # macOS bun installs to ~/.bun/bin
+        # shellcheck disable=SC2088  # Tilde expands on remote shell via SSH, not locally
         version=$(get_remote_version "$host" "bun" "~/.bun/bin/bun --version 2>/dev/null || bun --version")
     else
         version=$(get_remote_version "$host" "bun" "bun --version")
@@ -317,7 +319,7 @@ update_machine() {
 # JSON output mode
 output_json() {
     echo "{"
-    echo '  "checked_at": "'$(date -Iseconds)'",'
+    echo '  "checked_at": "'"$(date -Iseconds)"'",'
     echo '  "machines": ['
 
     local first=true

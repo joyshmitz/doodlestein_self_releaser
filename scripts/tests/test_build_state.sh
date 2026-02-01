@@ -483,7 +483,9 @@ test_build_state_exec_with_retry() {
     fail "build_state_exec_with_retry should succeed with true command"
   fi
 
+  # shellcheck disable=SC2034  # These are used by sourced build_state.sh
   BUILD_RETRY_MAX=3
+  # shellcheck disable=SC2034
   BUILD_RETRY_BASE_DELAY=5
 }
 
