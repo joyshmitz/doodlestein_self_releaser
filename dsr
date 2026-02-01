@@ -1615,12 +1615,6 @@ EOF
     [[ -z "$output_dir" ]] && output_dir="$state_dir/artifacts"
     mkdir -p "$output_dir"
 
-    # Check if act is available
-    if ! act_check; then
-        log_error "act not available - cannot build"
-        return 3
-    fi
-
     # Load tool config
     if ! act_load_repo_config "$tool_name"; then
         log_error "Tool '$tool_name' not found in repos.d"
@@ -1712,6 +1706,24 @@ EOF
     fi
 
     log_info "Targets: $target_list"
+
+    # Check if act is required for selected targets
+    local need_act=false
+    for target in $target_list; do
+        if act_platform_uses_act "$tool_name" "$target"; then
+            need_act=true
+            break
+        fi
+    done
+
+    if $need_act; then
+        if ! act_check; then
+            log_error "act not available - cannot build act targets"
+            return 3
+        fi
+    else
+        log_info "No act targets selected; skipping act dependency check"
+    fi
 
     # Check for mutually exclusive sync flags
     if $no_sync && $sync_only; then

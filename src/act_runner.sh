@@ -751,7 +751,7 @@ _act_sync_source() {
         if [[ "$host" == "wlap" ]]; then
             # Windows: convert forward slashes to backslashes, use cmd /c
             local win_path="${remote_path//\//\\}"
-            mkdir_cmd="cmd /c \"if not exist $win_path mkdir $win_path\" && cd /d \"$remote_path\""
+            mkdir_cmd="cmd /c \"if not exist \\\"$win_path\\\" mkdir \\\"$win_path\\\"\" && cd /d \"$win_path\""
         else
             mkdir_cmd="mkdir -p \"$remote_path\" && cd \"$remote_path\""
         fi

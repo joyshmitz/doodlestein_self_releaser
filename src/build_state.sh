@@ -27,6 +27,24 @@ BUILD_LOCK_STALE_THRESHOLD="${DSR_LOCK_STALE:-1800}"  # 30 min stale detection
 # State directory
 _BUILD_STATE_DIR=""
 
+# Compute SHA256 for a file (portable: sha256sum or shasum -a 256)
+# Usage: _build_state_sha256 <file>
+_build_state_sha256() {
+  local file="$1"
+
+  if command -v sha256sum &>/dev/null; then
+    sha256sum "$file" 2>/dev/null | awk '{print $1}'
+    return $?
+  fi
+
+  if command -v shasum &>/dev/null; then
+    shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
+    return $?
+  fi
+
+  return 3
+}
+
 # Initialize build state system
 build_state_init() {
   local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
@@ -451,7 +469,7 @@ build_state_add_artifact() {
 
   # Calculate sha256 if not provided
   if [[ -z "$sha256" && -f "$artifact_path" ]]; then
-    sha256=$(sha256sum "$artifact_path" 2>/dev/null | cut -d' ' -f1 || echo "")
+    sha256=$(_build_state_sha256 "$artifact_path" 2>/dev/null || echo "")
   fi
 
   local size=0

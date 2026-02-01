@@ -59,6 +59,24 @@ _cs_is_safe_path() {
     return 0
 }
 
+# Compute SHA256 for a file (portable: sha256sum or shasum -a 256)
+# Usage: _cs_sha256 <file>
+_cs_sha256() {
+    local file="$1"
+
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$file" 2>/dev/null | awk '{print $1}'
+        return $?
+    fi
+
+    if command -v shasum &>/dev/null; then
+        shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
+        return $?
+    fi
+
+    return 3
+}
+
 # ============================================================================
 # Checksum Operations
 # ============================================================================
@@ -120,7 +138,7 @@ checksum_generate() {
         fi
 
         local sha256
-        sha256=$(sha256sum "$file" | cut -d' ' -f1)
+        sha256=$(_cs_sha256 "$file" 2>/dev/null || echo "")
         checksums+="$sha256  $filename"$'\n'
     done < <(find "$dir" -maxdepth 1 -type f -name "$include_pattern" 2>/dev/null | sort)
 
@@ -167,7 +185,7 @@ checksum_verify() {
         fi
 
         local actual_sha
-        actual_sha=$(sha256sum "$file_path" | cut -d' ' -f1)
+        actual_sha=$(_cs_sha256 "$file_path" 2>/dev/null || echo "")
 
         if [[ "$expected_sha" == "$actual_sha" ]]; then
             _cs_log_debug "✓ $filename"

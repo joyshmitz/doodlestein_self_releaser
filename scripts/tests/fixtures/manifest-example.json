@@ -16,7 +16,7 @@
     {
       "name": "ntm-v1.2.3-linux-amd64.tar.gz",
       "target": "linux/amd64",
-      "sha256": "abc123def456789012345678901234567890abcdef1234567890abcdef12345678",
+      "sha256": "2d03090ebc334efc07bedaeb18e083b58b133076fe40e4f4da59c9f47f35fd1e",
       "size_bytes": 5242880,
       "archive_format": "tar.gz",
       "signed": true,
@@ -25,7 +25,7 @@
     {
       "name": "ntm-v1.2.3-darwin-arm64.tar.gz",
       "target": "darwin/arm64",
-      "sha256": "def456abc789012345678901234567890abcdef1234567890abcdef1234567890",
+      "sha256": "15864e5fe90e1b96532857b4ef5a9cccef14307d22def8575507c0ff66eb060b",
       "size_bytes": 5120000,
       "archive_format": "tar.gz",
       "signed": true,
@@ -34,7 +34,7 @@
     {
       "name": "ntm-v1.2.3-windows-amd64.zip",
       "target": "windows/amd64",
-      "sha256": "789abc123def456789012345678901234567890abcdef1234567890abcdef1234",
+      "sha256": "a38ee4abb8356321afafb9c6dd612dc83bce04c1542ea54541b35ccd09d49e0f",
       "size_bytes": 5500000,
       "archive_format": "zip",
       "signed": true,

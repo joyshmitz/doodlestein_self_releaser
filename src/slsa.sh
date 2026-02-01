@@ -29,6 +29,24 @@ SLSA_BUILDER_ID="${SLSA_BUILDER_ID:-https://github.com/Dicklesworthstone/doodles
 # In-Toto Statement Generation
 # ============================================================================
 
+# Compute SHA256 for a file (portable: sha256sum or shasum -a 256)
+# Usage: _slsa_sha256 <file>
+_slsa_sha256() {
+    local file="$1"
+
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$file" 2>/dev/null | awk '{print $1}'
+        return $?
+    fi
+
+    if command -v shasum &>/dev/null; then
+        shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
+        return $?
+    fi
+
+    return 3
+}
+
 # Generate SLSA v1 provenance for an artifact
 # Args: artifact_path [--builder <id>] [--output <file>]
 # Returns: 0 on success, path to provenance file on stdout
@@ -70,7 +88,7 @@ slsa_generate() {
 
     # Calculate artifact digest
     local artifact_sha256
-    artifact_sha256=$(sha256sum "$artifact" | cut -d' ' -f1)
+    artifact_sha256=$(_slsa_sha256 "$artifact" 2>/dev/null || echo "")
 
     local artifact_name
     artifact_name=$(basename "$artifact")
@@ -282,7 +300,7 @@ slsa_verify() {
     expected_sha256=$(jq -r '.subject[0].digest.sha256' "$provenance")
 
     local actual_sha256
-    actual_sha256=$(sha256sum "$artifact" | cut -d' ' -f1)
+    actual_sha256=$(_slsa_sha256 "$artifact" 2>/dev/null || echo "")
 
     if [[ "$expected_sha256" != "$actual_sha256" ]]; then
         log_error "Digest mismatch!"

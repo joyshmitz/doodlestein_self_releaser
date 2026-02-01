@@ -21,6 +21,10 @@ GH_CACHE_TTL="${GH_CACHE_TTL:-60}"  # seconds
 GH_MAX_RETRIES="${GH_MAX_RETRIES:-3}"
 GH_RETRY_DELAY="${GH_RETRY_DELAY:-5}"  # seconds
 
+# Last HTTP response metadata (curl path)
+_GH_LAST_HTTP_CODE=""
+_GH_LAST_ETAG=""
+
 # Colors for output (if not disabled)
 if [[ -z "${NO_COLOR:-}" && -t 2 ]]; then
     _GH_RED=$'\033[0;31m'
@@ -111,6 +115,21 @@ _gh_get_cache() {
     return 0
 }
 
+# Get cached response without TTL check (raw)
+# Usage: _gh_get_cache_raw <endpoint>
+_gh_get_cache_raw() {
+    local endpoint="$1"
+    local cache_key
+    cache_key=$(_gh_cache_key "$endpoint")
+    local cache_file="$GH_CACHE_DIR/${cache_key}.json"
+
+    if [[ -f "$cache_file" ]]; then
+        cat "$cache_file"
+        return 0
+    fi
+
+    return 1
+}
 # Save response to cache
 # Usage: _gh_set_cache <endpoint> <etag>
 # Reads response from stdin
@@ -190,6 +209,10 @@ gh_api() {
         return 4
     fi
 
+    # Reset last response metadata (set by curl path)
+    _GH_LAST_HTTP_CODE=""
+    _GH_LAST_ETAG=""
+
     # Check cache for GET requests
     if [[ "$method" == "GET" ]] && ! $no_cache; then
         local cached
@@ -216,9 +239,18 @@ gh_api() {
 
         # Check for rate limit
         if [[ $exit_code -eq 0 ]]; then
+            # Handle 304 Not Modified from curl path
+            if [[ "$method" == "GET" ]] && ! $no_cache && [[ "${_GH_LAST_HTTP_CODE:-}" == "304" ]]; then
+                local cached_raw
+                if cached_raw=$(_gh_get_cache_raw "$endpoint"); then
+                    echo "$cached_raw"
+                    return 0
+                fi
+            fi
+
             # Cache GET responses
             if [[ "$method" == "GET" ]] && ! $no_cache; then
-                echo "$response" | _gh_set_cache "$endpoint" ""
+                echo "$response" | _gh_set_cache "$endpoint" "${_GH_LAST_ETAG:-}"
             fi
             echo "$response"
             return 0
@@ -266,6 +298,7 @@ _gh_api_with_curl() {
     local url="https://api.github.com/$endpoint"
     local curl_args=(
         -s
+        -S
         -X "$method"
         -H "Accept: application/vnd.github+json"
         -H "Authorization: Bearer $GITHUB_TOKEN"
@@ -283,7 +316,38 @@ _gh_api_with_curl() {
         curl_args+=(-d "$data")
     fi
 
-    curl "${curl_args[@]}" "$url"
+    local raw headers body status_line http_code etag
+    local curl_status=0
+    raw=$(curl -D - "${curl_args[@]}" "$url") || curl_status=$?
+    if [[ $curl_status -ne 0 ]]; then
+        _GH_LAST_HTTP_CODE=""
+        _GH_LAST_ETAG=""
+        return $curl_status
+    fi
+
+    if [[ "$raw" == *$'\r\n\r\n'* ]]; then
+        headers="${raw%%$'\r\n\r\n'*}"
+        body="${raw#*$'\r\n\r\n'}"
+    elif [[ "$raw" == *$'\n\n'* ]]; then
+        headers="${raw%%$'\n\n'*}"
+        body="${raw#*$'\n\n'}"
+    else
+        headers=""
+        body="$raw"
+    fi
+
+    status_line=$(printf '%s\n' "$headers" | head -n 1)
+    http_code=$(printf '%s\n' "$status_line" | awk '{print $2}')
+    etag=$(printf '%s\n' "$headers" | awk -F': ' 'tolower($1)=="etag"{print $2}' | tr -d '\r')
+
+    _GH_LAST_HTTP_CODE="${http_code:-}"
+    _GH_LAST_ETAG="${etag:-}"
+
+    echo "$body"
+    if [[ -n "$http_code" && "$http_code" -ge 400 ]]; then
+        return 22
+    fi
+    return 0
 }
 
 # Check if response indicates rate limiting

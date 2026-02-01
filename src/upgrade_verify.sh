@@ -31,7 +31,7 @@ UPGRADE_VERIFY_TIMEOUT=30
 # Returns: 0 on success, 1 on failure
 upgrade_verify_tool() {
     local tool_name="${1:-}"
-    shift 2>/dev/null || true
+    shift 1 2>/dev/null || true
 
     local version=""  # Reserved for future use (assigned but not yet read)
     local build_from_source=false

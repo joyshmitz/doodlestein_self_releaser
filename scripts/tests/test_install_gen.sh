@@ -54,7 +54,8 @@ test_template_cache_path_logic() {
     template=$(_install_gen_template 2>/dev/null)
 
     # Verify cache path construction logic exists
-    if echo "$template" | grep -q 'echo "\${_CACHE_DIR}/\${TOOL_NAME}/'; then
+    # Note: use <<< to avoid SIGPIPE with grep -q on large templates under pipefail
+    if grep -q 'echo "\${_CACHE_DIR}/\${TOOL_NAME}/' <<< "$template"; then
         pass "template has cache path construction"
     else
         fail "template missing cache path construction"
@@ -73,7 +74,7 @@ test_template_cache_get_logic() {
     template=$(_install_gen_template 2>/dev/null)
 
     # Verify cache check logic
-    if echo "$template" | grep -q 'if \[\[ -f "\$cache_file" \]\]'; then
+    if grep -q 'if \[\[ -f "\$cache_file" \]\]' <<< "$template"; then
         pass "template has cache file check"
     else
         fail "template missing cache file check"
@@ -92,8 +93,8 @@ test_template_cache_put_logic() {
     template=$(_install_gen_template 2>/dev/null)
 
     # Verify cache put creates directories and copies file
-    if echo "$template" | grep -q 'mkdir -p "\$cache_dir"' && \
-       echo "$template" | grep -q 'cp "\$src_file" "\$cache_file"'; then
+    if grep -q 'mkdir -p "\$cache_dir"' <<< "$template" && \
+       grep -q 'cp "\$src_file" "\$cache_file"' <<< "$template"; then
         pass "template has cache put logic"
     else
         fail "template missing cache put logic"
@@ -112,7 +113,7 @@ test_template_offline_mode_error() {
     template=$(_install_gen_template 2>/dev/null)
 
     # Verify offline mode fails fast with clear error
-    if echo "$template" | grep -q 'Offline mode: no cached archive'; then
+    if grep -q 'Offline mode: no cached archive' <<< "$template"; then
         pass "template has offline mode error message"
     else
         fail "template missing offline mode error message"
@@ -135,7 +136,7 @@ test_template_has_cache_flags() {
     local template
     template=$(_install_gen_template 2>/dev/null)
 
-    if echo "$template" | grep -q -- "--cache-dir"; then
+    if grep -q -- "--cache-dir" <<< "$template"; then
         pass "template includes --cache-dir flag"
     else
         fail "template missing --cache-dir flag"
@@ -153,7 +154,7 @@ test_template_has_offline_flag() {
     local template
     template=$(_install_gen_template 2>/dev/null)
 
-    if echo "$template" | grep -q -- "--offline"; then
+    if grep -q -- "--offline" <<< "$template"; then
         pass "template includes --offline flag"
     else
         fail "template missing --offline flag"
@@ -171,7 +172,7 @@ test_template_has_prefer_gh_flag() {
     local template
     template=$(_install_gen_template 2>/dev/null)
 
-    if echo "$template" | grep -q -- "--prefer-gh"; then
+    if grep -q -- "--prefer-gh" <<< "$template"; then
         pass "template includes --prefer-gh flag"
     else
         fail "template missing --prefer-gh flag"
@@ -189,7 +190,7 @@ test_template_has_gh_download_function() {
     local template
     template=$(_install_gen_template 2>/dev/null)
 
-    if echo "$template" | grep -q "_gh_download"; then
+    if grep -q "_gh_download" <<< "$template"; then
         pass "template includes _gh_download function"
     else
         fail "template missing _gh_download function"
@@ -207,7 +208,7 @@ test_template_has_cache_get_function() {
     local template
     template=$(_install_gen_template 2>/dev/null)
 
-    if echo "$template" | grep -q "_cache_get"; then
+    if grep -q "_cache_get" <<< "$template"; then
         pass "template includes _cache_get function"
     else
         fail "template missing _cache_get function"

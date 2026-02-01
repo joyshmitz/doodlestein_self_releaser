@@ -51,9 +51,11 @@ fi
 # ============================================================================
 
 seed_repos_config() {
-    mkdir -p "$XDG_CONFIG_HOME/dsr"
+    # Use DSR_CONFIG_DIR (set by harness_setup) which dsr uses via act_load_repo_config
+    local config_dir="${DSR_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/dsr}"
+    mkdir -p "$config_dir"
 
-    cat > "$XDG_CONFIG_HOME/dsr/config.yaml" << 'YAML'
+    cat > "$config_dir/config.yaml" << 'YAML'
 schema_version: "1.0.0"
 threshold_seconds: 600
 log_level: info
@@ -61,20 +63,18 @@ signing:
   enabled: false
 YAML
 
-    # Create repos.yaml with test tool
-    cat > "$XDG_CONFIG_HOME/dsr/repos.yaml" << 'YAML'
-schema_version: "1.0.0"
-
-tools:
-  test-tool:
-    repo: testuser/test-tool
-    local_path: /tmp/test-tool
-    language: go
-    build_cmd: go build -o test-tool ./cmd/test-tool
-    binary_name: test-tool
-    targets:
-      - linux/amd64
-      - darwin/arm64
+    # Create per-tool config in repos.d (matches act_load_repo_config expectation)
+    mkdir -p "$config_dir/repos.d"
+    cat > "$config_dir/repos.d/test-tool.yaml" << 'YAML'
+tool_name: test-tool
+repo: testuser/test-tool
+local_path: /tmp/test-tool
+language: go
+build_cmd: go build -o test-tool ./cmd/test-tool
+binary_name: test-tool
+targets:
+  - linux/amd64
+  - darwin/arm64
 YAML
 }
 
