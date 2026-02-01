@@ -633,6 +633,249 @@ act_build_matrix() {
 # SSH settings for native builds
 _ACT_SSH_TIMEOUT="${DSR_SSH_TIMEOUT:-30}"
 _ACT_BUILD_TIMEOUT="${DSR_BUILD_TIMEOUT:-3600}"
+_ACT_SYNC_TIMEOUT="${DSR_SYNC_TIMEOUT:-300}"  # 5 minutes for sync
+
+# ============================================================================
+# Source Code Sync for Remote Native Builds
+# ============================================================================
+
+# Default exclude patterns for rsync
+_ACT_SYNC_DEFAULT_EXCLUDES=(
+    '.git'
+    'target'
+    'node_modules'
+    '.beads'
+    '*.log'
+    '.DS_Store'
+    '__pycache__'
+    '*.pyc'
+    '.env'
+    '.env.local'
+)
+
+# Check if rsync is available on remote host
+# Usage: _act_has_rsync <host>
+# Returns: 0 if rsync available, 1 otherwise
+_act_has_rsync() {
+    local host="$1"
+    timeout 10 ssh -o ConnectTimeout="$_ACT_SSH_TIMEOUT" \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=accept-new \
+        "$host" 'command -v rsync >/dev/null 2>&1' 2>/dev/null
+}
+
+# Sync source code to remote host via rsync
+# Usage: _act_sync_source <host> <local_path> <remote_path> [extra_excludes...]
+# Returns: 0 on success, non-zero on failure
+_act_sync_source() {
+    local host="$1"
+    local local_path="$2"
+    local remote_path="$3"
+    shift 3
+    local extra_excludes=("$@")
+
+    if [[ ! -d "$local_path" ]]; then
+        _log_error "Local path not found: $local_path"
+        return 4
+    fi
+
+    # Build exclude args
+    local exclude_args=()
+    for pattern in "${_ACT_SYNC_DEFAULT_EXCLUDES[@]}"; do
+        exclude_args+=("--exclude=$pattern")
+    done
+    for pattern in "${extra_excludes[@]}"; do
+        exclude_args+=("--exclude=$pattern")
+    done
+
+    # Add .gitignore patterns if available
+    if [[ -f "$local_path/.gitignore" ]]; then
+        exclude_args+=("--exclude-from=$local_path/.gitignore")
+    fi
+
+    _log_info "Syncing source to $host:$remote_path"
+
+    local start_time
+    start_time=$(date +%s)
+
+    # Check for rsync on remote
+    if _act_has_rsync "$host"; then
+        # Use rsync for efficient sync
+        if timeout "$_ACT_SYNC_TIMEOUT" rsync -az --delete \
+            "${exclude_args[@]}" \
+            -e "ssh -o ConnectTimeout=$_ACT_SSH_TIMEOUT -o StrictHostKeyChecking=accept-new" \
+            "$local_path/" "$host:$remote_path/" 2>&1; then
+            local duration=$(($(date +%s) - start_time))
+            _log_ok "Sync completed in ${duration}s (rsync)"
+            return 0
+        else
+            _log_error "rsync failed"
+            return 1
+        fi
+    else
+        # Fallback: tar + ssh + untar (works everywhere)
+        _log_warn "rsync not available on $host, using tar fallback"
+
+        # Build tar exclude args
+        local tar_excludes=()
+        for pattern in "${_ACT_SYNC_DEFAULT_EXCLUDES[@]}"; do
+            tar_excludes+=("--exclude=$pattern")
+        done
+        for pattern in "${extra_excludes[@]}"; do
+            tar_excludes+=("--exclude=$pattern")
+        done
+
+        # Create remote directory and extract
+        if timeout "$_ACT_SYNC_TIMEOUT" bash -c "
+            cd '$local_path' && \
+            tar czf - ${tar_excludes[*]} . | \
+            ssh -o ConnectTimeout=$_ACT_SSH_TIMEOUT \
+                -o StrictHostKeyChecking=accept-new \
+                '$host' 'mkdir -p \"$remote_path\" && cd \"$remote_path\" && tar xzf -'
+        " 2>&1; then
+            local duration=$(($(date +%s) - start_time))
+            _log_ok "Sync completed in ${duration}s (tar)"
+            return 0
+        else
+            _log_error "tar fallback sync failed"
+            return 1
+        fi
+    fi
+}
+
+# Sync source to all native build hosts for a tool
+# Usage: act_sync_sources <tool_name> [targets...]
+# Returns: JSON with sync results
+act_sync_sources() {
+    local tool_name="$1"
+    shift
+    local targets_arg=("$@")
+
+    local config_file="$ACT_REPOS_DIR/${tool_name}.yaml"
+    if [[ ! -f "$config_file" ]]; then
+        _log_error "Config not found: $config_file"
+        echo '{"status":"error","error":"Config not found"}'
+        return 4
+    fi
+
+    local local_path
+    local_path=$(act_get_local_path "$tool_name")
+    if [[ -z "$local_path" || ! -d "$local_path" ]]; then
+        _log_error "Local path not found: $local_path"
+        echo '{"status":"error","error":"Local path not found"}'
+        return 4
+    fi
+
+    # Determine targets
+    local targets
+    if [[ ${#targets_arg[@]} -gt 0 ]]; then
+        targets="${targets_arg[*]}"
+    else
+        targets=$(act_get_targets "$tool_name")
+    fi
+
+    # Find unique native hosts that need sync
+    local hosts_to_sync=()
+    local host_paths=()
+    for target in $targets; do
+        # Skip targets that use act (no sync needed)
+        if act_platform_uses_act "$tool_name" "$target"; then
+            continue
+        fi
+
+        local host
+        host=$(act_get_native_host "$target")
+        if [[ -z "$host" ]]; then
+            continue
+        fi
+
+        # Skip duplicates
+        local already_added=false
+        for h in "${hosts_to_sync[@]}"; do
+            if [[ "$h" == "$host" ]]; then
+                already_added=true
+                break
+            fi
+        done
+        if $already_added; then
+            continue
+        fi
+
+        # Get remote path (host_paths override or fallback to local_path)
+        local remote_path
+        remote_path=$(yq -r '.host_paths.'"$host"' // ""' "$config_file" 2>/dev/null)
+        [[ -z "$remote_path" ]] && remote_path="$local_path"
+
+        hosts_to_sync+=("$host")
+        host_paths+=("$remote_path")
+    done
+
+    if [[ ${#hosts_to_sync[@]} -eq 0 ]]; then
+        _log_info "No native build hosts need sync"
+        echo '{"status":"skipped","synced":0,"hosts":[]}'
+        return 0
+    fi
+
+    _log_info "Syncing to ${#hosts_to_sync[@]} host(s): ${hosts_to_sync[*]}"
+
+    local synced=0
+    local failed=0
+    local results=()
+    local start_time
+    start_time=$(date +%s)
+
+    for i in "${!hosts_to_sync[@]}"; do
+        local host="${hosts_to_sync[$i]}"
+        local remote_path="${host_paths[$i]}"
+
+        if _act_sync_source "$host" "$local_path" "$remote_path"; then
+            ((synced++))
+            results+=("{\"host\":\"$host\",\"path\":\"$remote_path\",\"status\":\"success\"}")
+        else
+            ((failed++))
+            results+=("{\"host\":\"$host\",\"path\":\"$remote_path\",\"status\":\"failed\"}")
+        fi
+    done
+
+    local total_duration=$(($(date +%s) - start_time))
+
+    # Determine overall status
+    local status
+    if [[ $failed -eq 0 ]]; then
+        status="success"
+    elif [[ $synced -gt 0 ]]; then
+        status="partial"
+    else
+        status="failed"
+    fi
+
+    # Build results JSON
+    local results_json
+    if [[ ${#results[@]} -eq 0 ]]; then
+        results_json="[]"
+    else
+        results_json=$(printf '%s\n' "${results[@]}" | jq -s '.')
+    fi
+
+    jq -nc \
+        --arg status "$status" \
+        --argjson synced "$synced" \
+        --argjson failed "$failed" \
+        --argjson duration "$total_duration" \
+        --argjson hosts "$results_json" \
+        '{
+            status: $status,
+            synced: $synced,
+            failed: $failed,
+            duration_seconds: $duration,
+            hosts: $hosts
+        }'
+
+    if [[ $failed -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
 
 # Get build command from config
 # Usage: act_get_build_cmd <tool_name>
@@ -849,13 +1092,30 @@ act_run_native_build() {
         artifact_filename=$(basename "$remote_artifact_path")
         local_artifact_path="$artifact_dir/$artifact_filename"
 
-        _log_info "Downloading artifact from $host..."
-        if scp -o ConnectTimeout="$_ACT_SSH_TIMEOUT" \
+        # Small delay to ensure file is fully flushed on remote
+        sleep 1
+
+        # Build SCP source - don't embed quotes in the path; let shell handle quoting
+        # scp interprets embedded quotes literally in the remote path
+        local scp_source="${host}:${remote_artifact_path}"
+
+        _log_info "Downloading artifact: $scp_source"
+        local scp_output
+        # Use separate arguments to avoid quote interpretation issues
+        if scp_output=$(scp -o ConnectTimeout="$_ACT_SSH_TIMEOUT" \
                -o StrictHostKeyChecking=accept-new \
-               "${host}:${remote_artifact_path}" "$local_artifact_path" >> "$log_file" 2>&1; then
+               "${host}:${remote_artifact_path}" "$local_artifact_path" 2>&1); then
             _log_ok "Artifact downloaded: $local_artifact_path"
+            # Log file size for verification
+            if [[ -f "$local_artifact_path" ]]; then
+                local file_size
+                file_size=$(stat -f%z "$local_artifact_path" 2>/dev/null || stat -c%s "$local_artifact_path" 2>/dev/null || echo "unknown")
+                _log_info "Artifact size: $file_size bytes"
+            fi
         else
             _log_error "Failed to download artifact from $host"
+            _log_error "SCP error: $scp_output"
+            echo "SCP failed: $scp_output" >> "$log_file"
             status="failed"
             exit_code=7
             local_artifact_path=""
@@ -1148,3 +1408,4 @@ export -f act_get_flags act_get_targets act_get_native_host act_get_build_strate
 export -f act_list_tools act_build_matrix
 export -f act_get_build_cmd act_get_build_env act_get_repo act_get_local_path
 export -f act_run_native_build act_orchestrate_build act_generate_manifest
+export -f act_sync_sources
