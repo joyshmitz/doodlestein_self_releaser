@@ -1467,6 +1467,8 @@ cmd_build() {
     local allow_dirty=false
     local no_sync=false
     local sync_only=false
+    local only_act=false
+    local only_native=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -1515,6 +1517,14 @@ cmd_build() {
                 sync_only=true
                 shift
                 ;;
+            --only-act)
+                only_act=true
+                shift
+                ;;
+            --only-native)
+                only_native=true
+                shift
+                ;;
             --help|-h)
                 cat << 'EOF'
 dsr build - Build artifacts locally
@@ -1534,6 +1544,8 @@ OPTIONS:
     --allow-dirty          Allow building with uncommitted changes
     --no-sync              Skip source sync to remote hosts
     --sync-only            Sync source to remote hosts without building
+    --only-act             Only build targets that use act (Linux, no SSH)
+    --only-native          Only build targets that require native SSH builds
 
 DESCRIPTION:
     Builds a tool for all configured targets using act (Linux) and
@@ -1555,6 +1567,8 @@ EXAMPLES:
     dsr build --tool bv --resume            Resume interrupted bv build
     dsr build ntm --sync-only               Sync source without building
     dsr build ntm --no-sync                 Build without syncing source
+    dsr build ntm --only-act                Build only act targets (Linux)
+    dsr build ntm --only-native             Build only native targets (macOS/Win)
 
 EXIT CODES:
     0  - All builds succeeded
@@ -1661,6 +1675,34 @@ EOF
     if [[ -z "$target_list" ]]; then
         log_error "No targets configured for $tool_name"
         return 4
+    fi
+
+    # Apply matrix filtering (--only-act / --only-native)
+    if $only_act || $only_native; then
+        local filtered_targets=()
+        for target in $target_list; do
+            if $only_act && act_platform_uses_act "$tool_name" "$target"; then
+                filtered_targets+=("$target")
+            elif $only_native && ! act_platform_uses_act "$tool_name" "$target"; then
+                filtered_targets+=("$target")
+            fi
+        done
+
+        if [[ ${#filtered_targets[@]} -eq 0 ]]; then
+            if $only_act; then
+                log_error "No act-compatible targets found (try without --only-act)"
+            else
+                log_error "No native build targets found (try without --only-native)"
+            fi
+            return 4
+        fi
+
+        target_list="${filtered_targets[*]}"
+        if $only_act; then
+            log_info "Filtered to act targets: $target_list"
+        else
+            log_info "Filtered to native targets: $target_list"
+        fi
     fi
 
     log_info "Targets: $target_list"

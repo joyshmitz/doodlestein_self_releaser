@@ -504,6 +504,27 @@ act_get_flags() {
         fi
     fi
 
+    # Matrix filtering for targeted builds (optional)
+    # Example:
+    # act_matrix:
+    #   "linux/amd64":
+    #     os: ubuntu-latest
+    #     target: linux/amd64
+    local matrix_entries
+    matrix_entries=$(yq -r '
+        .act_matrix."'"$platform"'" // {} |
+        to_entries |
+        .[] |
+        .key as $k |
+        (if (.value | type) == "array" then .value[] else .value end) |
+        "\($k):\(. | tostring)"
+    ' "$config_file" 2>/dev/null)
+    if [[ -n "$matrix_entries" ]]; then
+        while IFS= read -r entry; do
+            [[ -n "$entry" ]] && flags+=("--matrix $entry")
+        done <<< "$matrix_entries"
+    fi
+
     echo "${flags[*]}"
 }
 

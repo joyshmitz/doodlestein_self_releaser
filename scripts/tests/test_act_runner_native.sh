@@ -397,9 +397,10 @@ test_scp_unix_artifact_path() {
     local scp_args
     scp_args=$(get_scp_args)
 
-    # Go binary should be at project root, path quoted for spaces
-    if [[ "$scp_args" == *"mmini:'/local/path/mytool/mytool'"* ]]; then
-        log_pass "Go artifact path correct with quoting: '/local/path/mytool/mytool'"
+    # Go binary should be at project root
+    # Note: scp now uses separate shell arguments, so path is not embedded-quoted
+    if [[ "$scp_args" == *"mmini:/local/path/mytool/mytool "* ]]; then
+        log_pass "Go artifact path correct: /local/path/mytool/mytool"
     else
         log_fail "Expected Go artifact path in: $scp_args"
     fi
@@ -417,9 +418,10 @@ test_scp_rust_artifact_path() {
     local scp_args
     scp_args=$(get_scp_args)
 
-    # Rust binary should be in target/release, path quoted for spaces
-    if [[ "$scp_args" == *"mmini:'/local/path/mytool/target/release/mytool'"* ]]; then
-        log_pass "Rust artifact path correct with quoting: target/release/mytool"
+    # Rust binary should be in target/release
+    # Note: scp now uses separate shell arguments, so path is not embedded-quoted
+    if [[ "$scp_args" == *"mmini:/local/path/mytool/target/release/mytool "* ]]; then
+        log_pass "Rust artifact path correct: target/release/mytool"
     else
         log_fail "Expected Rust artifact path in: $scp_args"
     fi
