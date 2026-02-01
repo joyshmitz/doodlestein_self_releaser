@@ -103,8 +103,8 @@ seed_artifacts() {
   "git_sha": "abc123",
   "built_at": "2026-01-30T12:00:00Z",
   "artifacts": [
-    {"name": "${tool}-linux-amd64", "target": "linux/amd64", "sha256": "abc123", "size_bytes": 100},
-    {"name": "${tool}-darwin-arm64", "target": "darwin/arm64", "sha256": "def456", "size_bytes": 100}
+    {"name": "${tool}-linux-amd64", "target": "linux/amd64", "sha256": "abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abc1", "size_bytes": 100},
+    {"name": "${tool}-darwin-arm64", "target": "darwin/arm64", "sha256": "def456def456def456def456def456def456def456def456def456def456def4", "size_bytes": 100}
   ]
 }
 EOF

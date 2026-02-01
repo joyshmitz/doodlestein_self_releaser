@@ -96,9 +96,9 @@ seed_manifest() {
   "git_sha": "abc123def456",
   "built_at": "2026-01-30T12:00:00Z",
   "artifacts": [
-    {"filename": "${tool}-linux-amd64", "target": "linux/amd64", "sha256": "a1b2c3d4e5f6", "size_bytes": 1000},
-    {"filename": "${tool}-darwin-arm64", "target": "darwin/arm64", "sha256": "f6e5d4c3b2a1", "size_bytes": 1000},
-    {"filename": "SHA256SUMS", "target": "checksums", "sha256": "111222333444", "size_bytes": 200}
+    {"filename": "${tool}-linux-amd64", "target": "linux/amd64", "sha256": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", "size_bytes": 1000},
+    {"filename": "${tool}-darwin-arm64", "target": "darwin/arm64", "sha256": "f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5", "size_bytes": 1000},
+    {"filename": "SHA256SUMS", "target": "checksums", "sha256": "1112223334441112223334441112223334441112223334441112223334441112", "size_bytes": 200}
   ]
 }
 EOF
