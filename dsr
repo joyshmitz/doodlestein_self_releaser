@@ -1716,7 +1716,7 @@ EOF
     # Check for mutually exclusive sync flags
     if $no_sync && $sync_only; then
         log_error "--no-sync and --sync-only are mutually exclusive"
-        return 1
+        return 4
     fi
 
     # Sync source to remote hosts (unless --no-sync)
