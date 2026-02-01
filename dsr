@@ -1208,10 +1208,15 @@ _watch_iteration() {
         fi
     fi
 
-    # Parse check results
+    # Parse check results - extract throttled runs from queued_runs and stuck_runs
+    # JSON structure: .details.repos[].{repo, queued_runs[], stuck_runs[]}
     local throttled_runs
-    throttled_runs=$(echo "$check_output" | jq -r \
-        '.details.repos[]?.throttled_runs[]? | "\(.id)|\(.repo)"' 2>/dev/null)
+    throttled_runs=$(echo "$check_output" | jq -r '
+        .details.repos[]? |
+        . as $r |
+        ((.queued_runs // []) + (.stuck_runs // []))[] |
+        "\(.id)|\($r.repo)"
+    ' 2>/dev/null)
 
     if [[ -z "$throttled_runs" ]]; then
         log_ok "No throttled runs detected"
@@ -1236,18 +1241,22 @@ _watch_iteration() {
                 "$run_id" || true
         fi
 
+        # Extract tool name from repo (e.g., "Dicklesworthstone/ntm" -> "ntm")
+        local tool_name="${repo##*/}"
+
         if $dry_run; then
-            log_info "[DRY RUN] Would trigger fallback for $repo (run $run_id)"
+            log_info "[DRY RUN] Would trigger fallback for $tool_name (run $run_id)"
         else
-            log_info "Triggering fallback for $repo..."
+            log_info "Triggering fallback for $tool_name..."
 
             # Mark as triggered before attempting (to prevent repeated attempts on failure)
             _watch_mark_triggered "$run_id"
 
             # Trigger fallback as a background subprocess
+            # Note: --non-interactive is a global flag and must come before the subcommand
             local fallback_log="$_WATCH_STATE_DIR/fallback-${run_id}.log"
-            log_info "Starting fallback for $repo (run $run_id)..."
-            "$0" fallback "$repo" --non-interactive >> "$fallback_log" 2>&1 &
+            log_info "Starting fallback for $tool_name (run $run_id)..."
+            "$0" --non-interactive fallback "$tool_name" >> "$fallback_log" 2>&1 &
             local fallback_pid=$!
             log_info "Fallback started (PID: $fallback_pid, log: $fallback_log)"
             if [[ "${DSR_NOTIFY_ENABLED:-false}" == "true" ]]; then

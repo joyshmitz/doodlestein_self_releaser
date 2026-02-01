@@ -779,7 +779,7 @@ test_live_build_windows_native() {
         return
     fi
     rm -f "$_scp_test"
-    ssh -o BatchMode=yes -o ConnectTimeout=3 wlap 'del C:\tmp\dsr_scp_test 2>nul' &>/dev/null || true
+    # Note: remote /tmp/dsr_scp_test left for OS cleanup (cross-platform rm is complex)
 
     setup_test_environment
 
