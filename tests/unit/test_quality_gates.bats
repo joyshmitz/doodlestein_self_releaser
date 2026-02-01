@@ -140,12 +140,16 @@ teardown() {
     run qg_run_checks "test-tool"
     [[ "$status" -eq 0 ]]
 
-    # Should return JSON with results
-    echo "$output" | jq empty
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
+    # Should return valid JSON
+    echo "$json_output" | jq empty
 
     local passed total
-    passed=$(echo "$output" | jq '.passed')
-    total=$(echo "$output" | jq '.total')
+    passed=$(echo "$json_output" | jq '.passed')
+    total=$(echo "$json_output" | jq '.total')
 
     assert_equal "$passed" "2"
     assert_equal "$total" "2"
@@ -157,8 +161,12 @@ teardown() {
     run qg_run_checks "failing-tool"
     [[ "$status" -ne 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     local failed
-    failed=$(echo "$output" | jq '.failed')
+    failed=$(echo "$json_output" | jq '.failed')
     assert_equal "$failed" "1"
 }
 
@@ -168,9 +176,13 @@ teardown() {
     run qg_run_checks "test-tool"
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     # Check first result has output
     local first_output
-    first_output=$(echo "$output" | jq -r '.checks[0].output')
+    first_output=$(echo "$json_output" | jq -r '.checks[0].output')
     assert_contains "$first_output" "check 1 passed"
 }
 
@@ -180,8 +192,12 @@ teardown() {
     run qg_run_checks "test-tool"
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     local duration
-    duration=$(echo "$output" | jq '.duration_ms')
+    duration=$(echo "$json_output" | jq '.duration_ms')
     [[ "$duration" != "null" ]]
     [[ "$duration" -ge 0 ]]
 }
@@ -218,8 +234,12 @@ teardown() {
     run qg_run_checks "no-checks-tool"
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     local total
-    total=$(echo "$output" | jq '.total')
+    total=$(echo "$json_output" | jq '.total')
     assert_equal "$total" "0"
 }
 
@@ -233,9 +253,13 @@ teardown() {
     run qg_run_checks "failing-tool" --dry-run
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     # All checks should "pass" in dry-run
     local passed
-    passed=$(echo "$output" | jq '.passed')
+    passed=$(echo "$json_output" | jq '.passed')
     assert_equal "$passed" "3"
 }
 
@@ -245,8 +269,12 @@ teardown() {
     run qg_run_checks "test-tool" --dry-run
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     local dry_run
-    dry_run=$(echo "$output" | jq '.dry_run')
+    dry_run=$(echo "$json_output" | jq '.dry_run')
     assert_equal "$dry_run" "true"
 }
 
@@ -256,8 +284,12 @@ teardown() {
     run qg_run_checks "test-tool" --dry-run
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     local cmd
-    cmd=$(echo "$output" | jq -r '.checks[0].command')
+    cmd=$(echo "$json_output" | jq -r '.checks[0].command')
     assert_contains "$cmd" "echo"
 }
 
@@ -282,8 +314,12 @@ EOF
     run qg_run_checks "pwd-tool" --work-dir "$test_dir"
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     local output_content
-    output_content=$(echo "$output" | jq -r '.checks[0].output')
+    output_content=$(echo "$json_output" | jq -r '.checks[0].output')
     assert_contains "$output_content" "$test_dir"
 }
 
@@ -297,8 +333,12 @@ EOF
     run qg_run_checks "test-tool"
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     # Should be valid JSON
-    echo "$output" | jq empty
+    echo "$json_output" | jq empty
 }
 
 @test "qg_run_checks includes tool name" {
@@ -307,8 +347,12 @@ EOF
     run qg_run_checks "test-tool"
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     local tool
-    tool=$(echo "$output" | jq -r '.tool')
+    tool=$(echo "$json_output" | jq -r '.tool')
     assert_equal "$tool" "test-tool"
 }
 
@@ -318,11 +362,15 @@ EOF
     run qg_run_checks "test-tool"
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     # Check first result structure
     local has_command has_exit_code has_passed
-    has_command=$(echo "$output" | jq '.checks[0] | has("command")')
-    has_exit_code=$(echo "$output" | jq '.checks[0] | has("exit_code")')
-    has_passed=$(echo "$output" | jq '.checks[0] | has("passed")')
+    has_command=$(echo "$json_output" | jq '.checks[0] | has("command")')
+    has_exit_code=$(echo "$json_output" | jq '.checks[0] | has("exit_code")')
+    has_passed=$(echo "$json_output" | jq '.checks[0] | has("passed")')
 
     assert_equal "$has_command" "true"
     assert_equal "$has_exit_code" "true"
@@ -360,9 +408,13 @@ EOF
     run qg_run_checks "test-tool"
     [[ "$status" -eq 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     local passed failed
-    passed=$(echo "$output" | jq '.passed')
-    failed=$(echo "$output" | jq '.failed')
+    passed=$(echo "$json_output" | jq '.passed')
+    failed=$(echo "$json_output" | jq '.failed')
 
     # All checks passed
     assert_equal "$passed" "2"
@@ -375,13 +427,17 @@ EOF
     run qg_run_checks "failing-tool"
     [[ "$status" -ne 0 ]]
 
+    # Extract JSON from output (may have log messages mixed in)
+    local json_output
+    json_output=$(echo "$output" | grep -E '^\{' | head -1)
+
     # Should have run all checks
     local total
-    total=$(echo "$output" | jq '.total')
+    total=$(echo "$json_output" | jq '.total')
     assert_equal "$total" "3"
 
     # Should report one failure
     local failed
-    failed=$(echo "$output" | jq '.failed')
+    failed=$(echo "$json_output" | jq '.failed')
     assert_equal "$failed" "1"
 }

@@ -7,6 +7,16 @@
 # Load harness manually for this test file
 load helpers/test_harness.bash
 
+# Setup for each test - creates isolated environment
+setup() {
+  harness_setup
+}
+
+# Teardown for each test - cleanup
+teardown() {
+  harness_teardown
+}
+
 # ============================================================================
 # Mock Time Tests
 # ============================================================================

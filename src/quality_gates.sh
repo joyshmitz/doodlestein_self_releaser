@@ -228,7 +228,7 @@ EOF
 
     _qg_log_info "Running $check_count quality check(s) for $tool_name"
     $dry_run && _qg_log_info "(dry-run mode)"
-    echo ""
+    echo "" >&2
 
     # Run each check
     local results=()
@@ -265,7 +265,7 @@ EOF
 
     local total_duration_ms=$((total_end_ms - total_start_ms))
 
-    echo ""
+    echo "" >&2
 
     # Build results JSON
     local checks_json
