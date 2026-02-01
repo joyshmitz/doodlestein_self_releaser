@@ -143,11 +143,11 @@ fi
 echo ""
 echo "== act_get_flags (matrix) =="
 
-flags=$(act_get_flags "testool" "linux/amd64")
-if [[ "$flags" == *"--matrix os:ubuntu-latest"* ]] && [[ "$flags" == *"--matrix target:linux/amd64"* ]]; then
+matrix_flags=$(act_get_flags "testool" "linux/amd64")
+if [[ "$matrix_flags" == *"--matrix os:ubuntu-latest"* ]] && [[ "$matrix_flags" == *"--matrix target:linux/amd64"* ]]; then
     pass "act_get_flags includes matrix filters"
 else
-    fail "act_get_flags missing matrix filters: $flags"
+    fail "act_get_flags missing matrix filters: $matrix_flags"
 fi
 
 echo ""
