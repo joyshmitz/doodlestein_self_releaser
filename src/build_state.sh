@@ -45,6 +45,50 @@ _build_state_sha256() {
   return 3
 }
 
+# Safely update a JSON file using jq
+# Usage: _build_state_jq_update <state_file> <jq_args...>
+# This function:
+#   1. Runs jq with the given arguments
+#   2. Validates the output is non-empty valid JSON
+#   3. Atomically replaces the original file
+#   4. Returns 1 on any failure (jq error, empty output, mv failure)
+_build_state_jq_update() {
+  local state_file="$1"
+  shift  # remaining args are jq filter and arguments
+
+  local tmp_file="${state_file}.tmp.$$"
+
+  # Run jq and capture exit code
+  if ! jq "$@" "$state_file" > "$tmp_file" 2>/dev/null; then
+    log_error "Failed to update state: jq parse/filter error"
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  # Verify jq produced valid non-empty output
+  if [[ ! -s "$tmp_file" ]]; then
+    log_error "Failed to update state: jq produced empty output"
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  # Validate it's valid JSON
+  if ! jq -e '.' "$tmp_file" >/dev/null 2>&1; then
+    log_error "Failed to update state: jq produced invalid JSON"
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  # Atomic replace
+  if ! mv "$tmp_file" "$state_file"; then
+    log_error "Failed to update state: could not replace file"
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  return 0
+}
+
 # Initialize build state system
 build_state_init() {
   local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
@@ -122,7 +166,10 @@ build_lock_acquire() {
 
   local tool_dir
   tool_dir=$(_build_get_tool_dir "$tool" "$version")
-  mkdir -p "$tool_dir"
+  if ! mkdir -p "$tool_dir"; then
+    log_error "Failed to create tool directory: $tool_dir"
+    return 1
+  fi
 
   local lock_file
   lock_file=$(_build_get_lock_file "$tool" "$version")
@@ -132,25 +179,31 @@ build_lock_acquire() {
     # Read existing lock info
     local lock_pid lock_ts lock_run_id
     if read -r lock_pid lock_ts lock_run_id < "$lock_file" 2>/dev/null; then
-      local now
-      now=$(date +%s)
-      local age=$((now - lock_ts))
+      # Validate numeric fields to handle corrupted lock files
+      if [[ ! "$lock_pid" =~ ^[0-9]+$ ]] || [[ ! "$lock_ts" =~ ^[0-9]+$ ]]; then
+        log_warn "Corrupted lock file (invalid pid/ts), removing: $lock_file"
+        rm -f "$lock_file"
+      else
+        local now
+        now=$(date +%s)
+        local age=$((now - lock_ts))
 
-      # Check if lock is stale
-      if [[ $age -gt $BUILD_LOCK_STALE_THRESHOLD ]]; then
-        # Check if process is still alive
-        if ! kill -0 "$lock_pid" 2>/dev/null; then
-          log_warn "Removing stale lock (pid=$lock_pid, age=${age}s)"
-          rm -f "$lock_file"
+        # Check if lock is stale
+        if [[ $age -gt $BUILD_LOCK_STALE_THRESHOLD ]]; then
+          # Check if process is still alive
+          if ! kill -0 "$lock_pid" 2>/dev/null; then
+            log_warn "Removing stale lock (pid=$lock_pid, age=${age}s)"
+            rm -f "$lock_file"
+          else
+            # Process still alive but lock is old - respect it but warn
+            log_warn "Lock held by active process $lock_pid for ${age}s"
+            return 2
+          fi
         else
-          # Process still alive but lock is old - respect it but warn
-          log_warn "Lock held by active process $lock_pid for ${age}s"
+          # Lock is recent and valid
+          log_warn "Build already locked by pid=$lock_pid (run_id=$lock_run_id)"
           return 2
         fi
-      else
-        # Lock is recent and valid
-        log_warn "Build already locked by pid=$lock_pid (run_id=$lock_run_id)"
-        return 2
       fi
     fi
   fi
@@ -394,10 +447,21 @@ build_state_update_status() {
 
   # Update status and timestamp
   local tmp_file="$state_file.tmp"
-  jq --arg status "$status" --arg now "$now" \
-    '.status = $status | .updated_at = $now' "$state_file" > "$tmp_file" \
-    && mv "$tmp_file" "$state_file"
+  if ! jq --arg status "$status" --arg now "$now" \
+    '.status = $status | .updated_at = $now' "$state_file" > "$tmp_file" 2>/dev/null; then
+    log_error "Failed to update build state: jq parse error"
+    rm -f "$tmp_file"
+    return 1
+  fi
 
+  # Verify jq produced valid output before replacing
+  if [[ ! -s "$tmp_file" ]]; then
+    log_error "Failed to update build state: jq produced empty output"
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  mv "$tmp_file" "$state_file"
   log_debug "Build status updated: $tool $version -> $status"
 }
 
@@ -433,13 +497,11 @@ build_state_update_host() {
     extra_json='{}'
   fi
 
-  # Update host status
-  local tmp_file="$state_file.tmp"
-  jq --arg host "$host" --arg status "$host_status" --arg now "$now" \
+  # Update host status using safe helper
+  _build_state_jq_update "$state_file" \
+    --arg host "$host" --arg status "$host_status" --arg now "$now" \
     --argjson extra "$extra_json" \
-    '.hosts[$host] = ((.hosts[$host] // {}) + $extra + {status: $status, updated_at: $now}) | .updated_at = $now' \
-    "$state_file" > "$tmp_file" \
-    && mv "$tmp_file" "$state_file"
+    '.hosts[$host] = ((.hosts[$host] // {}) + $extra + {status: $status, updated_at: $now}) | .updated_at = $now'
 
   log_debug "Host status updated: $host -> $host_status"
 }
@@ -477,13 +539,11 @@ build_state_add_artifact() {
     size=$(stat -c%s "$artifact_path" 2>/dev/null || stat -f%z "$artifact_path" 2>/dev/null || echo 0)
   fi
 
-  # Add artifact to state
-  local tmp_file="$state_file.tmp"
-  jq --arg name "$artifact_name" --arg path "$artifact_path" \
+  # Add artifact to state using safe helper
+  _build_state_jq_update "$state_file" \
+    --arg name "$artifact_name" --arg path "$artifact_path" \
     --arg sha256 "$sha256" --argjson size "$size" --arg now "$now" \
-    '.artifacts = (.artifacts // []) + [{name: $name, path: $path, sha256: $sha256, size_bytes: $size, added_at: $now}] | .updated_at = $now' \
-    "$state_file" > "$tmp_file" \
-    && mv "$tmp_file" "$state_file"
+    '.artifacts = (.artifacts // []) + [{name: $name, path: $path, sha256: $sha256, size_bytes: $size, added_at: $now}] | .updated_at = $now'
 
   log_debug "Artifact added: $artifact_name"
 }
@@ -511,12 +571,10 @@ build_state_set_git_info() {
   local now
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-  # Update git info
-  local tmp_file="$state_file.tmp"
-  jq --arg sha "$git_sha" --arg ref "$git_ref" --arg now "$now" \
-    '.git_sha = $sha | .git_ref = $ref | .updated_at = $now' \
-    "$state_file" > "$tmp_file" \
-    && mv "$tmp_file" "$state_file"
+  # Update git info using safe helper
+  _build_state_jq_update "$state_file" \
+    --arg sha "$git_sha" --arg ref "$git_ref" --arg now "$now" \
+    '.git_sha = $sha | .git_ref = $ref | .updated_at = $now'
 
   log_debug "Git info set: $git_ref ($git_sha)"
 }
@@ -813,17 +871,15 @@ build_state_record_retry() {
   local now
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-  # Update host with retry info
-  local tmp_file="$state_file.tmp"
-  jq --arg host "$host" --argjson attempt "$attempt" \
+  # Update host with retry info using safe helper
+  _build_state_jq_update "$state_file" \
+    --arg host "$host" --argjson attempt "$attempt" \
     --arg error "$error_msg" --arg now "$now" \
     '.hosts[$host].retry_count = $attempt |
      .hosts[$host].last_error = $error |
      .hosts[$host].last_retry_at = $now |
      .hosts[$host].retries = ((.hosts[$host].retries // []) + [{attempt: $attempt, error: $error, at: $now}]) |
-     .updated_at = $now' \
-    "$state_file" > "$tmp_file" \
-    && mv "$tmp_file" "$state_file"
+     .updated_at = $now'
 
   log_debug "Recorded retry $attempt for $host: $error_msg"
 }
@@ -864,11 +920,10 @@ build_state_reset_retries() {
   local state_file="$tool_dir/$run_id/state.json"
   [[ ! -f "$state_file" ]] && return 1
 
-  local tmp_file="$state_file.tmp"
-  jq --arg host "$host" \
-    '.hosts[$host].retry_count = 0 | .hosts[$host].last_error = null' \
-    "$state_file" > "$tmp_file" \
-    && mv "$tmp_file" "$state_file"
+  # Reset retry state using safe helper
+  _build_state_jq_update "$state_file" \
+    --arg host "$host" \
+    '.hosts[$host].retry_count = 0 | .hosts[$host].last_error = null'
 }
 
 # Check if host has exceeded retry limit

@@ -206,7 +206,10 @@ act_run_workflow() {
     local artifact_dir="$ACT_ARTIFACTS_DIR/$run_id"
     local log_file="$ACT_LOGS_DIR/$run_id.log"
 
-    mkdir -p "$artifact_dir" "$ACT_LOGS_DIR"
+    if ! mkdir -p "$artifact_dir" "$ACT_LOGS_DIR"; then
+        _log_error "Failed to create run directories: $artifact_dir, $ACT_LOGS_DIR"
+        return 1
+    fi
 
     # Build act command
     local act_cmd=(
@@ -310,17 +313,30 @@ act_collect_artifacts() {
         return 1
     fi
 
-    mkdir -p "$output_dir"
+    if ! mkdir -p "$output_dir"; then
+        _log_error "Failed to create output directory: $output_dir"
+        return 1
+    fi
 
     # act stores artifacts in subdirectories by artifact name
     local count=0
+    local failed=0
     while IFS= read -r -d '' artifact; do
         local basename
         basename=$(basename "$artifact")
-        cp "$artifact" "$output_dir/$basename"
-        _log_info "Collected: $basename"
-        ((count++))
+        if cp "$artifact" "$output_dir/$basename"; then
+            _log_info "Collected: $basename"
+            ((count++))
+        else
+            _log_error "Failed to copy artifact: $artifact"
+            ((failed++))
+        fi
     done < <(find "$artifact_dir" -type f -print0)
+
+    if [[ $failed -gt 0 ]]; then
+        _log_error "Failed to collect $failed artifact(s)"
+        return 1
+    fi
 
     _log_ok "Collected $count artifacts"
     return 0

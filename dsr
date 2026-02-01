@@ -1090,7 +1090,10 @@ _watch_cleanup() {
 
 # Acquire lock to prevent multiple watcher instances
 _watch_acquire_lock() {
-    mkdir -p "$_WATCH_STATE_DIR"
+    if ! mkdir -p "$_WATCH_STATE_DIR"; then
+        log_error "Failed to create watch state directory: $_WATCH_STATE_DIR"
+        return 1
+    fi
 
     # Check for existing lock
     if [[ -f "$_WATCH_LOCK_FILE" ]]; then
@@ -1624,7 +1627,10 @@ EOF
     # Set output directory default
     local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
     [[ -z "$output_dir" ]] && output_dir="$state_dir/artifacts"
-    mkdir -p "$output_dir"
+    if ! mkdir -p "$output_dir"; then
+        log_error "Failed to create output directory: $output_dir"
+        return 1
+    fi
 
     # Load tool config
     if ! act_load_repo_config "$tool_name"; then
@@ -2482,7 +2488,10 @@ EOF
 
     # Upload state for resume
     local upload_state_file="$state_dir/releases/${tool_name}-${version}-upload.json"
-    mkdir -p "$(dirname "$upload_state_file")"
+    if ! mkdir -p "$(dirname "$upload_state_file")"; then
+        log_error "Failed to create releases directory"
+        return 1
+    fi
 
     local already_uploaded=()
     if $resume && [[ -f "$upload_state_file" ]]; then
@@ -3284,7 +3293,10 @@ EOF
     # Set output directory default
     local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
     [[ -z "$output_dir" ]] && output_dir="$state_dir/artifacts"
-    mkdir -p "$output_dir"
+    if ! mkdir -p "$output_dir"; then
+        log_error "Failed to create output directory: $output_dir"
+        return 1
+    fi
 
     # Load tool config
     if ! act_load_repo_config "$tool_name" 2>/dev/null; then
