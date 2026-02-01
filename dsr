@@ -1713,6 +1713,12 @@ EOF
 
     log_info "Targets: $target_list"
 
+    # Check for mutually exclusive sync flags
+    if $no_sync && $sync_only; then
+        log_error "--no-sync and --sync-only are mutually exclusive"
+        return 1
+    fi
+
     # Sync source to remote hosts (unless --no-sync)
     if ! $no_sync; then
         log_info "Syncing source to remote build hosts..."

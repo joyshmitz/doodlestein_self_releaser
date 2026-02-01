@@ -515,10 +515,8 @@ act_get_flags() {
         .act_matrix."'"$platform"'" // {} |
         to_entries |
         .[] |
-        .key as $k |
-        (if (.value | type) == "array" then .value[] else .value end) |
-        select(. != null and . != "") |
-        "\($k):\(. | tostring)"
+        select(.value != null and .value != "") |
+        .key + ":" + (.value | tostring)
     ' "$config_file" 2>/dev/null)
     if [[ -n "$matrix_entries" ]]; then
         while IFS= read -r entry; do
