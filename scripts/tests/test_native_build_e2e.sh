@@ -106,6 +106,8 @@ targets:
   - darwin/arm64
   - windows/amd64
 workflow: .github/workflows/release.yml
+act_job_map:
+  linux/amd64: build
 host_paths:
   mmini: ~/projects/$tool_name
   wlap: C:/Users/test/projects/$tool_name
