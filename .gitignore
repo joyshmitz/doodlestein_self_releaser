@@ -33,6 +33,7 @@ manifests/
 # OS files
 .DS_Store
 Thumbs.db
+._*
 
 # Temporary files
 *.tmp
