@@ -38,7 +38,13 @@ For dsr, use **Large** for maximum compatibility with complex workflows.
 
 ## ~/.actrc Configuration
 
-Create `~/.actrc` for consistent behavior:
+Create `~/.actrc` for consistent behavior. **The easiest way:**
+
+```bash
+cp /path/to/dsr/config/actrc.example ~/.actrc
+```
+
+Or create manually:
 
 ```bash
 # Default runner images (pin for reproducibility)
@@ -46,11 +52,47 @@ Create `~/.actrc` for consistent behavior:
 -P ubuntu-22.04=catthehacker/ubuntu:full-22.04
 -P ubuntu-20.04=catthehacker/ubuntu:full-20.04
 
-# Always use these settings
+# Architecture settings
 --container-architecture linux/amd64
---artifact-server-path /tmp/act-artifacts
---env ACTIONS_CACHE_URL=
---env ACTIONS_RUNTIME_URL=
+
+# Bind mount for faster file access
+--bind
+
+# CRITICAL: Prevent UID mismatch!
+# catthehacker images run as UID 1001 (user "runner")
+# Without this, files created by act will have wrong ownership
+--container-options --user=1000:1000
+
+# Artifact collection
+--artifact-server-path /tmp/dsr-act-artifacts
+```
+
+> **CRITICAL: The `--user` Line**
+>
+> Replace `1000:1000` with your actual UID:GID. Find yours with:
+> ```bash
+> id -u   # Your UID (usually 1000 on single-user systems)
+> id -g   # Your GID (usually 1000)
+> ```
+>
+> Without this line, **all files created by act will be owned by UID 1001**, making them inaccessible to your normal user. This breaks:
+> - Git operations (permission denied on .git files)
+> - Build tools (can't write to target directories)
+> - Other processes accessing the same directories
+>
+> **Always run `dsr doctor` after configuration to verify.**
+
+## Verifying Your Configuration
+
+```bash
+# Check actrc is properly configured
+dsr doctor
+
+# Should show:
+#   actrc: configured correctly (--bind with --user)
+
+# If you see this error, your actrc needs the --user line:
+#   actrc: CRITICAL - --bind without --user flag
 ```
 
 ## Platform Mapping
@@ -129,6 +171,41 @@ dsr build --repo ntm --targets linux/amd64
 ```
 
 ## Troubleshooting
+
+### Files owned by wrong user (UID 1001)
+
+**Symptom:** After running act, some files are owned by user ID 1001 instead of your user:
+
+```bash
+$ ls -la
+drwx------ 1001 1001 310 Jan 31 14:24 .beads
+-rw-r--r-- 1001 1001 4.0K Jan 25 16:18 some_file
+```
+
+**Cause:** The catthehacker runner images run as UID 1001 (user "runner"). When act bind-mounts your repo (`--bind`), files created inside the container get UID 1001 ownership.
+
+**Fix:**
+
+1. Add user mapping to `~/.actrc`:
+   ```bash
+   echo '--container-options --user=$(id -u):$(id -g)' >> ~/.actrc
+   ```
+
+2. Fix existing files:
+   ```bash
+   sudo chown -R $(id -un):$(id -gn) /path/to/repo
+   ```
+
+3. Verify the fix:
+   ```bash
+   dsr doctor
+   # Should show: actrc: configured correctly (--bind with --user)
+   ```
+
+**Prevention:** Always use the example config:
+```bash
+cp /path/to/dsr/config/actrc.example ~/.actrc
+```
 
 ### "Cannot connect to Docker daemon"
 ```bash

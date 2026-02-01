@@ -576,6 +576,43 @@ EOF
         ((warnings++))
     fi
 
+    # Check actrc configuration (CRITICAL: prevents UID mismatch)
+    # catthehacker images run as UID 1001 (runner). Without --user flag,
+    # files created by act will have wrong ownership, breaking other processes.
+    local actrc_file="$HOME/.actrc"
+    if [[ -f "$actrc_file" ]]; then
+        local has_bind=false has_user=false
+        # Use 'command grep' to bypass any aliases (e.g., rg aliased as grep)
+        if command grep -qE '^--bind$|^--bind[[:space:]]' "$actrc_file" 2>/dev/null; then
+            has_bind=true
+        fi
+        if command grep -qE -- '--container-options.*--user|--container-options=.*--user' "$actrc_file" 2>/dev/null; then
+            has_user=true
+        fi
+
+        if $has_bind && ! $has_user; then
+            _add_check "actrc" "error" ", \"message\": \"--bind without --user causes UID mismatch\", \"file\": \"$actrc_file\""
+            log_error "  actrc: CRITICAL - --bind without --user flag"
+            log_error "         Files created by act will have wrong ownership (UID 1001)"
+            log_error "         This WILL break file access for other processes!"
+            fixes+=("Fix actrc: Add to ~/.actrc: --container-options --user=\$(id -u):\$(id -g)")
+            fixes+=("Or run: echo '--container-options --user=$(id -u):$(id -g)' >> ~/.actrc")
+            ((errors++))
+        elif $has_bind && $has_user; then
+            _add_check "actrc" "ok" ", \"file\": \"$actrc_file\", \"bind\": true, \"user_mapping\": true"
+            log_ok "  actrc: configured correctly (--bind with --user)"
+        else
+            _add_check "actrc" "ok" ", \"file\": \"$actrc_file\", \"bind\": false"
+            log_ok "  actrc: present (no --bind, no UID concerns)"
+        fi
+    else
+        _add_check "actrc" "warning" ", \"message\": \"not found\", \"file\": \"$actrc_file\""
+        log_warn "  actrc: ~/.actrc not found"
+        fixes+=("Create actrc: cp $SCRIPT_DIR/config/actrc.example ~/.actrc")
+        fixes+=("See docs/ACT_SETUP.md for configuration guide")
+        ((warnings++))
+    fi
+
     # Check SSH
     if command -v ssh &>/dev/null; then
         _add_check "ssh" "ok" ""

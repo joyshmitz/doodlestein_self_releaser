@@ -31,7 +31,7 @@ _log_ok()    { echo "${_GREEN}[act]${_NC} $*" >&2; }
 _log_warn()  { echo "${_YELLOW}[act]${_NC} $*" >&2; }
 _log_error() { echo "${_RED}[act]${_NC} $*" >&2; }
 
-# Check if act is available
+# Check if act is available and properly configured
 act_check() {
     if ! command -v act &>/dev/null; then
         _log_error "act not found. Install: brew install act (macOS) or go install github.com/nektos/act@latest"
@@ -41,6 +41,37 @@ act_check() {
     if ! docker info &>/dev/null; then
         _log_error "Docker daemon not running or not accessible"
         return 3
+    fi
+
+    # CRITICAL: Check for UID mismatch configuration
+    # catthehacker images run as UID 1001. Without --user flag,
+    # files created by act will have wrong ownership!
+    local actrc_file="$HOME/.actrc"
+    if [[ -f "$actrc_file" ]]; then
+        local has_bind=false has_user=false
+        # Use 'command grep' to bypass any aliases (e.g., rg aliased as grep)
+        if command grep -qE '^--bind$|^--bind[[:space:]]' "$actrc_file" 2>/dev/null; then
+            has_bind=true
+        fi
+        if command grep -qE -- '--container-options.*--user|--container-options=.*--user' "$actrc_file" 2>/dev/null; then
+            has_user=true
+        fi
+
+        if $has_bind && ! $has_user; then
+            _log_error "═══════════════════════════════════════════════════════════════════"
+            _log_error "CRITICAL: ~/.actrc has --bind but missing --user flag!"
+            _log_error ""
+            _log_error "Files created by act will have WRONG OWNERSHIP (UID 1001 instead of $(id -u))"
+            _log_error "This WILL corrupt your repository with inaccessible files!"
+            _log_error ""
+            _log_error "FIX: Add this line to ~/.actrc:"
+            _log_error "    --container-options --user=$(id -u):$(id -g)"
+            _log_error ""
+            _log_error "Or run: echo '--container-options --user=$(id -u):$(id -g)' >> ~/.actrc"
+            _log_error "Or run: dsr doctor --fix"
+            _log_error "═══════════════════════════════════════════════════════════════════"
+            return 3
+        fi
     fi
 
     return 0

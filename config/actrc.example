@@ -1,5 +1,15 @@
 # ~/.actrc - nektos/act configuration for dsr
-# Copy this to ~/.actrc on the build host (css)
+#
+# INSTALLATION:
+#   cp config/actrc.example ~/.actrc
+#
+# IMPORTANT: After copying, update the --user line with YOUR UID:GID:
+#   id -u  # Your UID (replace 1000 below)
+#   id -g  # Your GID (replace 1000 below)
+#
+# DOCUMENTATION: See docs/ACT_SETUP.md for complete setup guide
+#
+# VERIFY: Run 'dsr doctor' to check configuration
 
 # Runner image mappings (pin for reproducibility)
 # Using catthehacker images which include common build tools

@@ -137,6 +137,24 @@ For local builds:
 - **docker** — Required for nektos/act containers
 - **act** — `brew install act` or [nektos/act releases](https://github.com/nektos/act/releases)
 
+> **CRITICAL: act Configuration Required**
+>
+> The default act runner images (catthehacker/ubuntu) run as UID 1001. If you use `--bind` in your `~/.actrc` without proper user mapping, **files created by act will have wrong ownership**, breaking access for other processes.
+>
+> After installing act, copy the example config:
+> ```bash
+> cp config/actrc.example ~/.actrc
+> ```
+>
+> Or ensure your `~/.actrc` includes:
+> ```
+> --container-options --user=$(id -u):$(id -g)
+> ```
+>
+> Run `dsr doctor` to verify your configuration.
+>
+> See [docs/ACT_SETUP.md](docs/ACT_SETUP.md) for complete setup instructions.
+
 For multi-platform builds:
 - **ssh** — Access to macOS/Windows build machines
 
@@ -487,6 +505,32 @@ chsh -s /opt/homebrew/bin/bash
 # Start Docker Desktop, or:
 sudo systemctl start docker  # Linux
 ```
+
+### Files owned by wrong user (UID 1001) after running act
+
+This happens when `~/.actrc` has `--bind` but is missing the `--user` flag. The catthehacker runner images run as UID 1001 (user "runner"), so files they create get that ownership.
+
+**Fix:**
+
+```bash
+# Add user mapping to actrc
+echo '--container-options --user=$(id -u):$(id -g)' >> ~/.actrc
+
+# Fix existing files
+sudo chown -R $(id -un):$(id -gn) /path/to/affected/repo
+```
+
+**Prevention:**
+
+```bash
+# Copy the example config (already has the fix)
+cp /path/to/dsr/config/actrc.example ~/.actrc
+
+# Verify configuration
+dsr doctor
+```
+
+See [docs/ACT_SETUP.md](docs/ACT_SETUP.md) for complete act setup instructions.
 
 ---
 
