@@ -4216,8 +4216,77 @@ goreleaser_validate_tool() {
 }
 
 # Validate repository configurations
+# Includes artifact naming consistency checks (bd-1tv.4)
 cmd_repos_validate() {
-    local repo_filter="${1:-}"
+    local repo_filter=""
+    local path_override=""
+    local naming_only=false
+    local skip_naming=false
+
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-r)
+                repo_filter="$2"
+                shift 2
+                ;;
+            --path|-p)
+                path_override="$2"
+                shift 2
+                ;;
+            --naming|--naming-only)
+                naming_only=true
+                shift
+                ;;
+            --skip-naming)
+                skip_naming=true
+                shift
+                ;;
+            --help|-h)
+                cat << 'EOF'
+dsr repos validate - Validate repository configurations
+
+USAGE:
+    dsr repos validate [options]
+
+OPTIONS:
+    --repo, -r <name>   Validate only this repository
+    --path, -p <path>   Validate a local project (not registered)
+    --naming            Only check artifact naming consistency
+    --skip-naming       Skip artifact naming checks
+    --json              Output in JSON format
+
+ARTIFACT NAMING CHECKS:
+    Validates consistency between:
+    - repos.d/*.yaml artifact_naming config
+    - Project install.sh expected patterns
+    - .github/workflows/release.yml artifact names
+
+    Detects mismatches BEFORE a release attempt fails.
+
+EXAMPLES:
+    dsr repos validate                  Validate all repos
+    dsr repos validate --repo ntm       Validate specific repo
+    dsr repos validate --path /data/projects/my_tool
+    dsr repos validate --naming         Only check naming
+EOF
+                return 0
+                ;;
+            *)
+                # For backward compat: first positional arg is repo filter
+                if [[ -z "$repo_filter" && "$1" != -* ]]; then
+                    repo_filter="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # If --path specified, validate that project directly
+    if [[ -n "$path_override" ]]; then
+        _validate_project_at_path "$path_override"
+        return $?
+    fi
 
     if [[ ! -f "$DSR_REPOS_FILE" ]]; then
         log_error "Repos file not found"
@@ -4227,6 +4296,11 @@ cmd_repos_validate() {
     if ! command -v yq &>/dev/null; then
         log_error "yq required for validation"
         return 3
+    fi
+
+    # Load artifact_naming module for naming checks
+    if [[ "$skip_naming" != "true" ]]; then
+        _dsr_require artifact_naming
     fi
 
     local tools_json
@@ -4245,16 +4319,19 @@ cmd_repos_validate() {
 
         local status="ok"
         local messages=()
+        local naming_info="{}"
 
         # Check required fields
         local repo local_path
         repo=$(echo "$tool_json" | jq -r '.repo // ""')
         local_path=$(echo "$tool_json" | jq -r '.local_path // ""')
 
-        if [[ -z "$repo" && -z "$local_path" ]]; then
-            status="error"
-            messages+=("Missing both 'repo' and 'local_path' - need at least one")
-            ((errors++))
+        if [[ "$naming_only" != "true" ]]; then
+            if [[ -z "$repo" && -z "$local_path" ]]; then
+                status="error"
+                messages+=("Missing both 'repo' and 'local_path' - need at least one")
+                ((errors++))
+            fi
         fi
 
         local resolved_path=""
@@ -4262,55 +4339,90 @@ cmd_repos_validate() {
         if [[ -n "$local_path" ]]; then
             source "$SCRIPT_DIR/src/guardrails.sh"
             resolved_path=$(resolve_path "$local_path" 2>/dev/null) || {
-                status="error"
-                messages+=("Invalid local_path: $local_path")
-                ((errors++))
+                if [[ "$naming_only" != "true" ]]; then
+                    status="error"
+                    messages+=("Invalid local_path: $local_path")
+                    ((errors++))
+                fi
             }
             if [[ -n "$resolved_path" && ! -d "$resolved_path" ]]; then
-                status="warn"
-                messages+=("local_path does not exist: $resolved_path")
-                ((warnings++))
+                if [[ "$naming_only" != "true" ]]; then
+                    status="warn"
+                    messages+=("local_path does not exist: $resolved_path")
+                    ((warnings++))
+                fi
             fi
         fi
 
-        # Check workflow file exists
-        local workflow
-        workflow=$(echo "$tool_json" | jq -r '.workflow // ""')
-        if [[ -n "$workflow" && -n "$local_path" ]]; then
-            source "$SCRIPT_DIR/src/guardrails.sh"
-            local resolved_path
-            resolved_path=$(resolve_path "$local_path" 2>/dev/null) || true
-            if [[ -n "$resolved_path" && ! -f "$resolved_path/$workflow" ]]; then
+        # Skip non-naming checks if --naming flag
+        if [[ "$naming_only" != "true" ]]; then
+            # Check workflow file exists
+            local workflow
+            workflow=$(echo "$tool_json" | jq -r '.workflow // ""')
+            if [[ -n "$workflow" && -n "$local_path" ]]; then
+                source "$SCRIPT_DIR/src/guardrails.sh"
+                local workflow_resolved_path
+                workflow_resolved_path=$(resolve_path "$local_path" 2>/dev/null) || true
+                if [[ -n "$workflow_resolved_path" && ! -f "$workflow_resolved_path/$workflow" ]]; then
+                    if [[ "$status" != "error" ]]; then
+                        status="warn"
+                    fi
+                    messages+=("Workflow file not found: $workflow")
+                    ((warnings++))
+                fi
+            fi
+
+            # GoReleaser compatibility validation (best-effort)
+            local gr_result gr_status gr_message
+            gr_result=$(goreleaser_validate_tool "$name" "$tool_json" "$resolved_path")
+            gr_status="${gr_result%%|*}"
+            gr_message="${gr_result#*|}"
+            if [[ "$gr_status" == "warn" && -n "$gr_message" ]]; then
                 if [[ "$status" != "error" ]]; then
                     status="warn"
                 fi
-                messages+=("Workflow file not found: $workflow")
+                messages+=("$gr_message")
                 ((warnings++))
+            elif [[ "$gr_status" == "error" && -n "$gr_message" ]]; then
+                status="error"
+                messages+=("$gr_message")
+                ((errors++))
             fi
         fi
 
-        # GoReleaser compatibility validation (best-effort)
-        local gr_result gr_status gr_message
-        gr_result=$(goreleaser_validate_tool "$name" "$tool_json" "$resolved_path")
-        gr_status="${gr_result%%|*}"
-        gr_message="${gr_result#*|}"
-        if [[ "$gr_status" == "warn" && -n "$gr_message" ]]; then
-            if [[ "$status" != "error" ]]; then
-                status="warn"
+        # Artifact naming consistency validation (bd-1tv.4)
+        if [[ "$skip_naming" != "true" && -n "$resolved_path" && -d "$resolved_path" ]]; then
+            local naming_result
+            naming_result=$(_validate_artifact_naming "$name" "$tool_json" "$resolved_path")
+
+            local naming_status naming_messages naming_json
+            naming_status=$(echo "$naming_result" | jq -r '.status // "ok"')
+            naming_messages=$(echo "$naming_result" | jq -r '.messages[]? // empty' 2>/dev/null)
+            naming_json="$naming_result"
+
+            if [[ "$naming_status" == "warning" ]]; then
+                if [[ "$status" != "error" ]]; then
+                    status="warn"
+                fi
+                while IFS= read -r msg; do
+                    [[ -n "$msg" ]] && messages+=("Naming: $msg")
+                done <<< "$naming_messages"
+                ((warnings++))
+            elif [[ "$naming_status" == "error" ]]; then
+                status="error"
+                while IFS= read -r msg; do
+                    [[ -n "$msg" ]] && messages+=("Naming: $msg")
+                done <<< "$naming_messages"
+                ((errors++))
             fi
-            messages+=("$gr_message")
-            ((warnings++))
-        elif [[ "$gr_status" == "error" && -n "$gr_message" ]]; then
-            status="error"
-            messages+=("$gr_message")
-            ((errors++))
+            naming_info="$naming_json"
         fi
 
         local msg_str=""
         [[ ${#messages[@]} -gt 0 ]] && msg_str=$(IFS='; '; echo "${messages[*]}")
 
-        results+=("$(jq -nc --arg repo "$name" --arg status "$status" --arg message "$msg_str" \
-            '{repo: $repo, status: $status, message: $message}')")
+        results+=("$(jq -nc --arg repo "$name" --arg status "$status" --arg message "$msg_str" --argjson naming "$naming_info" \
+            '{repo: $repo, status: $status, message: $message, naming: $naming}')")
 
         if ! $JSON_MODE; then
             if [[ "$status" == "ok" ]]; then
@@ -4348,6 +4460,230 @@ cmd_repos_validate() {
             log_ok "All repositories validated successfully"
         fi
     fi
+}
+
+# Validate artifact naming consistency for a tool
+# Args: tool_name tool_json resolved_path
+# Output: JSON with status, messages, and naming details
+_validate_artifact_naming() {
+    local tool="$1"
+    local tool_json="$2"
+    local repo_path="$3"
+
+    local status="ok"
+    local messages=()
+    local sources="{}"
+    local mismatches=()
+    local recommendations=()
+
+    # Get config pattern
+    local config_pattern
+    config_pattern=$(echo "$tool_json" | jq -r '.artifact_naming // ""')
+
+    # Get install_script_compat (explicit override)
+    local install_compat
+    install_compat=$(echo "$tool_json" | jq -r '.install_script_compat // ""')
+
+    # Get install.sh pattern (if available)
+    local install_pattern=""
+    local install_path
+    install_path=$(echo "$tool_json" | jq -r '.install_script_path // ""')
+    if [[ -z "$install_path" ]]; then
+        # Default locations to check
+        for default_path in "install.sh" "scripts/install.sh" "install"; do
+            if [[ -f "$repo_path/$default_path" ]]; then
+                install_path="$default_path"
+                break
+            fi
+        done
+    fi
+
+    if [[ -n "$install_path" && -f "$repo_path/$install_path" ]]; then
+        install_pattern=$(artifact_naming_parse_install_script "$repo_path/$install_path" 2>/dev/null || echo "")
+    fi
+
+    # Get workflow pattern (if available)
+    local workflow_patterns=""
+    local workflow_file
+    workflow_file=$(echo "$tool_json" | jq -r '.workflow // ""')
+    if [[ -z "$workflow_file" ]]; then
+        workflow_file=".github/workflows/release.yml"
+    fi
+
+    if [[ -f "$repo_path/$workflow_file" ]]; then
+        workflow_patterns=$(artifact_naming_parse_workflow "$repo_path/$workflow_file" 2>/dev/null || echo "[]")
+    fi
+
+    # Build sources JSON
+    sources=$(jq -nc \
+        --arg config "$config_pattern" \
+        --arg install "$install_pattern" \
+        --arg install_compat "$install_compat" \
+        --argjson workflow "${workflow_patterns:-[]}" \
+        '{config: $config, install_script: $install, install_script_compat: $install_compat, workflow: $workflow}')
+
+    # Validate using artifact_naming module
+    if [[ -n "$config_pattern" || -n "$install_pattern" ]]; then
+        local validation_result
+        validation_result=$(artifact_naming_validate "$tool" "$config_pattern" "$install_pattern" "$workflow_patterns" 2>/dev/null || echo "{}")
+
+        local val_status
+        val_status=$(echo "$validation_result" | jq -r '.status // "ok"')
+
+        if [[ "$val_status" == "warning" ]]; then
+            status="warning"
+            # Extract recommendations
+            local recs
+            recs=$(echo "$validation_result" | jq -r '.recommendations[]? // empty')
+            while IFS= read -r rec; do
+                [[ -n "$rec" ]] && recommendations+=("$rec")
+            done <<< "$recs"
+
+            # Check specific mismatch types
+            if echo "$validation_result" | jq -e '.mismatches[]? | select(.field == "version")' &>/dev/null; then
+                messages+=("Config includes version but install.sh does not expect it")
+                if [[ -z "$install_compat" ]]; then
+                    recommendations+=("Add install_script_compat: \"\${name}-\${os}-\${arch}\" to config")
+                fi
+            fi
+
+            if echo "$validation_result" | jq -e '.mismatches[]? | select(.field == "separator")' &>/dev/null; then
+                messages+=("Separator mismatch between config and install.sh")
+            fi
+        fi
+    fi
+
+    # Check for missing patterns
+    if [[ -z "$config_pattern" && -z "$install_pattern" ]]; then
+        # No patterns to validate - not an error, just skip
+        :
+    elif [[ -n "$config_pattern" && -n "$install_pattern" && -z "$install_compat" ]]; then
+        # Both patterns exist but no explicit compat - check if they differ
+        local config_has_version=false
+        local install_has_version=false
+
+        [[ "$config_pattern" == *'${version}'* || "$config_pattern" == *'-v'* ]] && config_has_version=true
+        [[ "$install_pattern" == *'${version}'* || "$install_pattern" == *'-v'* ]] && install_has_version=true
+
+        if [[ "$config_has_version" == "true" && "$install_has_version" == "false" ]]; then
+            if [[ "$status" != "error" ]]; then
+                status="warning"
+            fi
+            messages+=("Versioned config but install.sh expects unversioned")
+            recommendations+=("dsr will auto-generate compat names during release")
+        fi
+    fi
+
+    # Build result JSON
+    local msgs_json recs_json
+    msgs_json=$(printf '%s\n' "${messages[@]}" 2>/dev/null | jq -R . | jq -sc '.')
+    recs_json=$(printf '%s\n' "${recommendations[@]}" 2>/dev/null | jq -R . | jq -sc '.')
+
+    jq -nc \
+        --arg status "$status" \
+        --argjson sources "$sources" \
+        --argjson messages "${msgs_json:-[]}" \
+        --argjson recommendations "${recs_json:-[]}" \
+        '{status: $status, sources: $sources, messages: $messages, recommendations: $recommendations}'
+}
+
+# Validate a project at a specific path (not in repos registry)
+# Args: path
+_validate_project_at_path() {
+    local project_path="$1"
+
+    source "$SCRIPT_DIR/src/guardrails.sh"
+    local resolved_path
+    resolved_path=$(resolve_path "$project_path" --must-exist 2>&1) || {
+        log_error "Invalid path: $project_path"
+        return 4
+    }
+
+    if [[ ! -d "$resolved_path" ]]; then
+        log_error "Path does not exist: $resolved_path"
+        return 4
+    fi
+
+    _dsr_require artifact_naming
+
+    # Try to detect tool name from directory or package files
+    local tool_name
+    tool_name=$(basename "$resolved_path")
+
+    # Check for Cargo.toml, package.json, etc.
+    if [[ -f "$resolved_path/Cargo.toml" ]]; then
+        local cargo_name
+        cargo_name=$(grep -m1 '^name\s*=' "$resolved_path/Cargo.toml" | sed 's/.*=\s*"\([^"]*\)".*/\1/' 2>/dev/null)
+        [[ -n "$cargo_name" ]] && tool_name="$cargo_name"
+    elif [[ -f "$resolved_path/package.json" ]]; then
+        local pkg_name
+        pkg_name=$(jq -r '.name // empty' "$resolved_path/package.json" 2>/dev/null)
+        [[ -n "$pkg_name" ]] && tool_name="${pkg_name##*/}"  # Strip scope
+    fi
+
+    log_info "Validating naming consistency for: $tool_name at $resolved_path"
+
+    # Build minimal tool_json
+    local tool_json
+    tool_json=$(jq -nc --arg path "$resolved_path" '{local_path: $path}')
+
+    local result
+    result=$(_validate_artifact_naming "$tool_name" "$tool_json" "$resolved_path")
+
+    local status
+    status=$(echo "$result" | jq -r '.status')
+
+    if $JSON_MODE; then
+        json_envelope "repos" "success" 0 "$(jq -nc --arg tool "$tool_name" --argjson result "$result" '{action: "validate", tool: $tool, naming: $result}')"
+    else
+        local sources
+        sources=$(echo "$result" | jq -r '.sources')
+
+        echo ""
+        log_info "Sources detected:"
+        local config_pattern install_pattern
+        config_pattern=$(echo "$sources" | jq -r '.config // ""')
+        install_pattern=$(echo "$sources" | jq -r '.install_script // ""')
+
+        if [[ -n "$config_pattern" ]]; then
+            echo "  Config:     $config_pattern"
+        else
+            echo "  Config:     (none)"
+        fi
+
+        if [[ -n "$install_pattern" ]]; then
+            echo "  Install.sh: $install_pattern"
+        else
+            echo "  Install.sh: (not found or no pattern detected)"
+        fi
+
+        echo ""
+
+        if [[ "$status" == "ok" ]]; then
+            log_ok "Naming consistency: OK"
+        elif [[ "$status" == "warning" ]]; then
+            log_warn "Naming consistency: warnings detected"
+            echo ""
+            echo "Messages:"
+            echo "$result" | jq -r '.messages[]?' | while IFS= read -r msg; do
+                echo "  - $msg"
+            done
+            echo ""
+            echo "Recommendations:"
+            echo "$result" | jq -r '.recommendations[]?' | while IFS= read -r rec; do
+                echo "  - $rec"
+            done
+        else
+            log_error "Naming consistency: errors detected"
+            echo "$result" | jq -r '.messages[]?' | while IFS= read -r msg; do
+                echo "  - $msg"
+            done
+        fi
+    fi
+
+    [[ "$status" == "ok" ]] && return 0
+    [[ "$status" == "warning" ]] && return 0  # Warnings are not failures
+    return 1
 }
 
 # Discover repositories that could benefit from dsr
