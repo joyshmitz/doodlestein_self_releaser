@@ -445,23 +445,11 @@ build_state_update_status() {
   local now
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-  # Update status and timestamp
-  local tmp_file="${state_file}.tmp.$$"
-  if ! jq --arg status "$status" --arg now "$now" \
-    '.status = $status | .updated_at = $now' "$state_file" > "$tmp_file" 2>/dev/null; then
-    log_error "Failed to update build state: jq parse error"
-    rm -f "$tmp_file"
-    return 1
-  fi
+  # Use safe jq update helper (validates non-empty and valid JSON)
+  _build_state_jq_update "$state_file" \
+    --arg status "$status" --arg now "$now" \
+    '.status = $status | .updated_at = $now' || return 1
 
-  # Verify jq produced valid output before replacing
-  if [[ ! -s "$tmp_file" ]]; then
-    log_error "Failed to update build state: jq produced empty output"
-    rm -f "$tmp_file"
-    return 1
-  fi
-
-  mv "$tmp_file" "$state_file"
   log_debug "Build status updated: $tool $version -> $status"
 }
 

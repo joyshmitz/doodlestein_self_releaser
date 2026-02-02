@@ -40,25 +40,69 @@ _cs_log_debug() { [[ "${CS_DEBUG:-}" == "1" ]] && echo "${_CS_BLUE}[checksum-syn
 # Safety Checks
 # ============================================================================
 
+# Normalize a path without relying on realpath (resolves ., .., and //)
+# Duplicated from guardrails.sh for standalone use
+_cs_normalize_path() {
+    local path="$1"
+    local is_abs=false
+    [[ "$path" == /* ]] && is_abs=true
+
+    local IFS='/'
+    local -a parts=()
+    read -r -a parts <<< "$path"
+
+    local -a stack=()
+    local part
+    for part in "${parts[@]}"; do
+        case "$part" in
+            ""|".")
+                continue
+                ;;
+            "..")
+                if [[ ${#stack[@]} -gt 0 ]]; then
+                    unset 'stack[${#stack[@]}-1]'
+                elif ! $is_abs; then
+                    stack+=("..")
+                fi
+                ;;
+            *)
+                stack+=("$part")
+                ;;
+        esac
+    done
+
+    local normalized=""
+    if $is_abs; then
+        normalized="/"
+    fi
+    if [[ ${#stack[@]} -gt 0 ]]; then
+        local joined
+        joined=$(IFS=/; printf '%s' "${stack[*]}")
+        normalized+="$joined"
+    fi
+
+    [[ -z "$normalized" ]] && normalized="/"
+    printf '%s' "$normalized"
+}
+
 # Verify path is safe to modify (not in protected directories)
 # Args: path
 # Returns: 0 if safe, 1 if protected
 _cs_is_safe_path() {
     local path="$1"
     local abs_path
-    # realpath -m is GNU-only; use portable fallback for macOS
+
+    # Convert to absolute path first
+    if [[ "$path" != /* ]]; then
+        path="$PWD/$path"
+    fi
+
+    # Normalize path to resolve .., ., and //
+    # Use realpath if available (handles symlinks), otherwise use pure-bash fallback
     if command -v realpath &>/dev/null && realpath -m / &>/dev/null 2>&1; then
-        abs_path=$(realpath -m "$path" 2>/dev/null || echo "$path")
-    elif [[ -e "$path" ]]; then
-        # Path exists, use cd + pwd to resolve
-        abs_path=$(cd "$(dirname "$path")" && pwd)/$(basename "$path")
+        abs_path=$(realpath -m "$path" 2>/dev/null || _cs_normalize_path "$path")
     else
-        # Path doesn't exist, just clean it up minimally
-        # Remove trailing slashes and normalize // to /
-        abs_path="${path%/}"
-        abs_path="${abs_path//\/\//\/}"
-        # If relative, prepend PWD
-        [[ "$abs_path" != /* ]] && abs_path="$PWD/$abs_path"
+        abs_path=$(_cs_normalize_path "$path")
     fi
 
     for protected in "${CHECKSUM_SYNC_PROTECTED_PATHS[@]}"; do
