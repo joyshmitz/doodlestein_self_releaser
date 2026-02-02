@@ -128,11 +128,12 @@ _get_latest_version() {
         return 1
     }
 
-    # Extract tag_name from JSON (works with jq or grep)
+    # Extract tag_name from JSON (works with jq or POSIX tools)
     if command -v jq &>/dev/null; then
         echo "$response" | jq -r '.tag_name'
     else
-        echo "$response" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1
+        # Avoid non-portable grep -P (not available on macOS/BSD)
+        echo "$response" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
     fi
 }
 

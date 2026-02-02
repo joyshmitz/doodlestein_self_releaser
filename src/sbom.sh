@@ -235,8 +235,15 @@ sbom_generate_artifacts() {
                 ;;
         esac
 
-        # Skip if SBOM already exists
-        local sbom_file="${artifact}.sbom.${format%%json}.json"
+        # Skip if SBOM already exists - must match the output path from sbom_generate
+        # sbom_generate uses: ${target%.*}.sbom.$output_ext
+        # where output_ext is "spdx.json" or "cdx.json"
+        local output_ext
+        case "$format" in
+            spdx|spdx-json)   output_ext="spdx.json" ;;
+            cyclonedx|cdx|*)  output_ext="cdx.json" ;;
+        esac
+        local sbom_file="${artifact%.*}.sbom.$output_ext"
         if [[ -f "$sbom_file" ]]; then
             log_debug "SBOM already exists: $sbom_file"
             continue
