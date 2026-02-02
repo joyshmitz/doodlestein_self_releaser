@@ -2520,32 +2520,54 @@ EOF
     log_ok "Release created: $release_url"
 
     # Cache existing release assets to avoid duplicate upload failures
-    local -A release_assets=()
+    local -A release_asset_ids=()
     if command -v jq &>/dev/null; then
-        while IFS= read -r asset_name; do
-            [[ -n "$asset_name" ]] && release_assets["$asset_name"]=1
-        done < <(echo "$release_json" | jq -r '.assets[]?.name // empty' 2>/dev/null)
+        while IFS=$'\t' read -r asset_name asset_id; do
+            [[ -n "$asset_name" && -n "$asset_id" && "$asset_id" != "null" ]] && release_asset_ids["$asset_name"]="$asset_id"
+        done < <(echo "$release_json" | jq -r '.assets[]? | [.name, (.id|tostring)] | @tsv' 2>/dev/null)
     fi
 
     # Collect files to upload
     local files_to_upload=()
+    local -A files_to_upload_set=()
     local uploaded_assets=()
     local failed_assets=()
     local skipped_assets=()
 
-    # Find all files in artifacts directory
-    while IFS= read -r file; do
-        [[ -f "$file" ]] && files_to_upload+=("$file")
-    done < <(find "$artifacts_dir" -maxdepth 1 -type f 2>/dev/null)
+    _release_add_file() {
+        local file="$1"
+        [[ -z "$file" || ! -f "$file" ]] && return 0
+        if [[ -z "${files_to_upload_set[$file]:-}" ]]; then
+            files_to_upload+=("$file")
+            files_to_upload_set["$file"]=1
+        fi
+    }
 
-    # Also look for checksum and signature files
-    local checksum_file="$artifacts_dir/SHA256SUMS.txt"
-    local sig_file="$artifacts_dir/SHA256SUMS.txt.minisig"
+    # Build upload list from manifest when available to avoid stale artifacts
+    if $manifest_exists && [[ -f "$manifest_file" ]]; then
+        while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            local file_path="$artifacts_dir/$name"
+            if [[ -f "$file_path" ]]; then
+                _release_add_file "$file_path"
+            else
+                log_warn "Manifest references missing artifact: $name"
+            fi
+        done < <(jq -r '.artifacts[]?.name // .artifacts[]?.filename // empty' "$manifest_file" 2>/dev/null)
 
-    local checksum_pattern=" $checksum_file "
-    local sig_pattern=" $sig_file "
-    [[ -f "$checksum_file" && ! " ${files_to_upload[*]} " =~ $checksum_pattern ]] && files_to_upload+=("$checksum_file")
-    [[ -f "$sig_file" && ! " ${files_to_upload[*]} " =~ $sig_pattern ]] && files_to_upload+=("$sig_file")
+        # Include manifest and common sidecar files (checksums, signatures, SBOM, provenance)
+        _release_add_file "$manifest_file"
+        while IFS= read -r extra_file; do
+            _release_add_file "$extra_file"
+        done < <(find "$artifacts_dir" -maxdepth 1 -type f \
+            \( -name 'SHA256SUMS*' -o -name '*.minisig' -o -name '*.sbom.*' -o -name '*.intoto.jsonl' \) \
+            2>/dev/null)
+    else
+        # Fallback: upload all files in artifacts directory
+        while IFS= read -r file; do
+            _release_add_file "$file"
+        done < <(find "$artifacts_dir" -maxdepth 1 -type f 2>/dev/null)
+    fi
 
     local total_files=${#files_to_upload[@]}
     log_info "Uploading $total_files file(s)..."
@@ -2564,6 +2586,22 @@ EOF
         done < <(jq -r '.uploaded[]?.name // empty' "$upload_state_file" 2>/dev/null)
         log_info "Resuming: ${#already_uploaded[@]} file(s) already uploaded"
     fi
+
+    _release_delete_asset() {
+        local name="$1"
+        local asset_id="${release_asset_ids[$name]:-}"
+        if [[ -n "$asset_id" ]]; then
+            log_info "Deleting existing asset: $name"
+            if gh_api "repos/$repo/releases/assets/$asset_id" --method DELETE --no-cache >/dev/null 2>&1; then
+                unset "release_asset_ids[$name]"
+                return 0
+            else
+                log_error "Failed to delete existing asset: $name"
+                return 1
+            fi
+        fi
+        return 0
+    }
 
     # Map manifest artifact names to targets and formats (for dual-name uploads)
     local -A manifest_targets=()
@@ -2649,38 +2687,44 @@ EOF
 
                 log_info "[$idx/$total_files] Uploading dual assets for: $filename"
 
-                # Upload versioned name (or skip if already present)
+                # Upload versioned name (overwrite if already present)
                 local versioned_pattern=" $versioned_name "
-                if [[ -n "${release_assets[$versioned_name]:-}" || " ${already_uploaded[*]} " =~ $versioned_pattern ]]; then
+                if [[ " ${already_uploaded[*]} " =~ $versioned_pattern ]]; then
                     log_info "  Skipping (already uploaded): $versioned_name"
                     skipped_assets+=("$versioned_name")
                 else
-                    if gh_upload_asset_named "$upload_url" "$file" "$versioned_name" "$content_type" 2>&1; then
-                        log_ok "  Uploaded: $versioned_name ($size_bytes bytes)"
-                        _release_record_uploaded "$versioned_name" "uploaded" "$size_bytes" "$content_type"
-                        release_assets["$versioned_name"]=1
+                    if _release_delete_asset "$versioned_name"; then
+                        if gh_upload_asset_named "$upload_url" "$file" "$versioned_name" "$content_type" 2>&1; then
+                            log_ok "  Uploaded: $versioned_name ($size_bytes bytes)"
+                            _release_record_uploaded "$versioned_name" "uploaded" "$size_bytes" "$content_type"
+                        else
+                            local upload_error="Upload failed for $versioned_name"
+                            log_error "  $upload_error"
+                            _release_record_failed "$versioned_name" "$upload_error"
+                        fi
                     else
-                        local upload_error="Upload failed for $versioned_name"
-                        log_error "  $upload_error"
-                        _release_record_failed "$versioned_name" "$upload_error"
+                        _release_record_failed "$versioned_name" "Failed to delete existing asset"
                     fi
                 fi
 
                 # Upload compat name if different
                 if [[ "$same_names" != "true" ]]; then
                     local compat_pattern=" $compat_name "
-                    if [[ -n "${release_assets[$compat_name]:-}" || " ${already_uploaded[*]} " =~ $compat_pattern ]]; then
+                    if [[ " ${already_uploaded[*]} " =~ $compat_pattern ]]; then
                         log_info "  Skipping (already uploaded): $compat_name"
                         skipped_assets+=("$compat_name")
                     else
-                        if gh_upload_asset_named "$upload_url" "$file" "$compat_name" "$content_type" 2>&1; then
-                            log_ok "  Uploaded: $compat_name ($size_bytes bytes)"
-                            _release_record_uploaded "$compat_name" "uploaded" "$size_bytes" "$content_type"
-                            release_assets["$compat_name"]=1
+                        if _release_delete_asset "$compat_name"; then
+                            if gh_upload_asset_named "$upload_url" "$file" "$compat_name" "$content_type" 2>&1; then
+                                log_ok "  Uploaded: $compat_name ($size_bytes bytes)"
+                                _release_record_uploaded "$compat_name" "uploaded" "$size_bytes" "$content_type"
+                            else
+                                local compat_error="Upload failed for $compat_name"
+                                log_error "  $compat_error"
+                                _release_record_failed "$compat_name" "$compat_error"
+                            fi
                         else
-                            local compat_error="Upload failed for $compat_name"
-                            log_error "  $compat_error"
-                            _release_record_failed "$compat_name" "$compat_error"
+                            _release_record_failed "$compat_name" "Failed to delete existing asset"
                         fi
                     fi
                 fi
@@ -2690,7 +2734,7 @@ EOF
 
         # Skip if already uploaded (resume mode or already in release)
         local filename_pattern=" $filename "
-        if [[ " ${already_uploaded[*]} " =~ $filename_pattern || -n "${release_assets[$filename]:-}" ]]; then
+        if [[ " ${already_uploaded[*]} " =~ $filename_pattern ]]; then
             log_info "[$idx/$total_files] Skipping (already uploaded): $filename"
             skipped_assets+=("$filename")
             continue
@@ -2700,14 +2744,17 @@ EOF
 
         # Upload
         local upload_result
-        if upload_result=$(gh_upload_asset "$upload_url" "$file" "$content_type" 2>&1); then
-            log_ok "  Uploaded: $filename ($size_bytes bytes)"
-            _release_record_uploaded "$filename" "uploaded" "$size_bytes" "$content_type"
-            release_assets["$filename"]=1
+        if _release_delete_asset "$filename"; then
+            if upload_result=$(gh_upload_asset "$upload_url" "$file" "$content_type" 2>&1); then
+                log_ok "  Uploaded: $filename ($size_bytes bytes)"
+                _release_record_uploaded "$filename" "uploaded" "$size_bytes" "$content_type"
+            else
+                log_error "  Failed to upload: $filename"
+                log_error "  Error: $upload_result"
+                _release_record_failed "$filename" "$upload_result"
+            fi
         else
-            log_error "  Failed to upload: $filename"
-            log_error "  Error: $upload_result"
-            _release_record_failed "$filename" "$upload_result"
+            _release_record_failed "$filename" "Failed to delete existing asset"
         fi
     done
 
