@@ -270,8 +270,14 @@ _gh_download() {
     artifact_name="${artifact_name//\$\{version\}/$version_num}"
     artifact_name="${artifact_name//\$\{os\}/$os}"
     artifact_name="${artifact_name//\$\{arch\}/$arch}"
-    artifact_name="${artifact_name//\$\{ext\}/$format}"
-    local asset_name="${artifact_name}.${format}"
+    # Only append extension if pattern doesn't include ${ext}
+    local asset_name
+    if [[ "$ARTIFACT_NAMING" == *'${ext}'* ]]; then
+        artifact_name="${artifact_name//\$\{ext\}/$format}"
+        asset_name="$artifact_name"
+    else
+        asset_name="${artifact_name}.${format}"
+    fi
 
     _log_info "Downloading via gh release download: $asset_name"
 
@@ -333,9 +339,16 @@ _get_download_url() {
     artifact_name="${artifact_name//\$\{version\}/$version_num}"
     artifact_name="${artifact_name//\$\{os\}/$os}"
     artifact_name="${artifact_name//\$\{arch\}/$arch}"
-    artifact_name="${artifact_name//\$\{ext\}/$format}"
+    # Only append extension if pattern doesn't include ${ext}
+    local final_name
+    if [[ "$ARTIFACT_NAMING" == *'${ext}'* ]]; then
+        artifact_name="${artifact_name//\$\{ext\}/$format}"
+        final_name="$artifact_name"
+    else
+        final_name="${artifact_name}.${format}"
+    fi
 
-    echo "https://github.com/$REPO/releases/download/$version/${artifact_name}.${format}"
+    echo "https://github.com/$REPO/releases/download/$version/${final_name}"
 }
 
 # Download and verify checksum

@@ -90,6 +90,12 @@ slsa_generate() {
     local artifact_sha256
     artifact_sha256=$(_slsa_sha256 "$artifact" 2>/dev/null || echo "")
 
+    # Fail if SHA256 computation failed - provenance without valid digest is invalid
+    if [[ -z "$artifact_sha256" ]]; then
+        log_error "Failed to compute SHA256 for: $artifact"
+        return 1
+    fi
+
     local artifact_name
     artifact_name=$(basename "$artifact")
 
