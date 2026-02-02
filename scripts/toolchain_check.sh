@@ -164,10 +164,11 @@ show_comparison() {
         fi
 
         local rust go node bun
-        rust=$(echo "$result" | grep -oP 'rust=\K[^,]+')
-        go=$(echo "$result" | grep -oP 'go=\K[^,]+')
-        node=$(echo "$result" | grep -oP 'node=\K[^,]+')
-        bun=$(echo "$result" | grep -oP 'bun=\K[^,]+')
+        # Avoid non-portable grep -P (not available on macOS/BSD)
+        rust=$(echo "$result" | sed -n 's/.*rust=\([^,]*\).*/\1/p')
+        go=$(echo "$result" | sed -n 's/.*go=\([^,]*\).*/\1/p')
+        node=$(echo "$result" | sed -n 's/.*node=\([^,]*\).*/\1/p')
+        bun=$(echo "$result" | sed -n 's/.*bun=\([^,]*\).*/\1/p')
 
         # Store trj versions as baseline
         if [[ "$machine" == "trj" ]]; then
@@ -336,9 +337,10 @@ output_json() {
             echo "    {\"name\": \"$machine\", \"status\": \"unreachable\"}"
         else
             local rust go node
-            rust=$(echo "$result" | grep -oP 'rust=\K[^,]+')
-            go=$(echo "$result" | grep -oP 'go=\K[^,]+')
-            node=$(echo "$result" | grep -oP 'node=\K[^,]+')
+            # Avoid non-portable grep -P (not available on macOS/BSD)
+            rust=$(echo "$result" | sed -n 's/.*rust=\([^,]*\).*/\1/p')
+            go=$(echo "$result" | sed -n 's/.*go=\([^,]*\).*/\1/p')
+            node=$(echo "$result" | sed -n 's/.*node=\([^,]*\).*/\1/p')
 
             echo -n "    {\"name\": \"$machine\", \"status\": \"ok\", "
             echo -n "\"rust\": \"$rust\", \"go\": \"$go\", \"node\": \"$node\"}"

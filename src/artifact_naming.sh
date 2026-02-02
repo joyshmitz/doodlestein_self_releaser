@@ -109,30 +109,30 @@ artifact_naming_parse_install_script() {
     # Pattern 1: TAR variable assignment
     # TAR="cass-${TARGET}.${EXT}"
     # TAR="${name}-${TARGET}.tar.gz"
+    # Avoid non-portable grep -P (not available on macOS/BSD)
     if [[ -z "$pattern" ]]; then
-        pattern=$(echo "$content" | grep -oP 'TAR="[^"]*\$[^"]*"' | head -1 || true)
+        pattern=$(echo "$content" | sed -n 's/.*TAR="\([^"]*\$[^"]*\)".*/\1/p' | head -1 || true)
         if [[ -n "$pattern" ]]; then
-            pattern="${pattern#TAR=\"}"
-            pattern="${pattern%\"}"
             _an_log_debug "Found TAR pattern: $pattern"
         fi
     fi
 
     # Pattern 2: asset_name variable
     # asset_name="rch-${TARGET}.tar.gz"
+    # Avoid non-portable grep -P (not available on macOS/BSD)
     if [[ -z "$pattern" ]]; then
-        pattern=$(echo "$content" | grep -oiP 'asset_name="[^"]*\$[^"]*"' | head -1 || true)
+        pattern=$(echo "$content" | sed -n 's/.*[Aa][Ss][Ss][Ee][Tt]_[Nn][Aa][Mm][Ee]="\([^"]*\$[^"]*\)".*/\1/p' | head -1 || true)
         if [[ -n "$pattern" ]]; then
-            pattern=$(echo "$pattern" | sed -E 's/^[^"]*"([^"]*)".*/\1/')
             _an_log_debug "Found asset_name pattern: $pattern"
         fi
     fi
 
     # Pattern 3: Download URL with filename
     # URL="https://...releases/download/${VERSION}/${name}-${TARGET}.tar.gz"
+    # Avoid non-portable grep -P (not available on macOS/BSD)
     if [[ -z "$pattern" ]]; then
         local url_match
-        url_match=$(echo "$content" | grep -oP 'https://[^"]*releases/download/[^"]*' | head -1 || true)
+        url_match=$(echo "$content" | sed -n 's/.*\(https:\/\/[^"]*releases\/download\/[^"]*\).*/\1/p' | head -1 || true)
         if [[ -n "$url_match" ]]; then
             # Extract filename portion after last /
             pattern="${url_match##*/}"
@@ -142,9 +142,10 @@ artifact_naming_parse_install_script() {
 
     # Pattern 4: Direct curl/wget with asset pattern
     # curl ... "https://.../${name}-${os}-${arch}.tar.gz"
+    # Avoid non-portable grep -P (not available on macOS/BSD)
     if [[ -z "$pattern" ]]; then
         local curl_match
-        curl_match=$(echo "$content" | grep -oP 'curl[^|]*\$\{?[A-Za-z_]+[^"]*\.tar\.gz' | head -1 || true)
+        curl_match=$(echo "$content" | sed -n 's/.*\(curl[^|]*\$[^"]*\.tar\.gz\).*/\1/p' | head -1 || true)
         if [[ -n "$curl_match" ]]; then
             pattern="${curl_match##*/}"
             _an_log_debug "Extracted from curl: $pattern"
