@@ -2016,6 +2016,373 @@ EOF
         done
     }
 
+    local -a extra_manifest_entries=()
+    local -A existing_archive_formats=()
+
+    _build_sha256() {
+        local file="$1"
+
+        if command -v sha256sum &>/dev/null; then
+            sha256sum "$file" 2>/dev/null | awk '{print $1}'
+            return $?
+        fi
+
+        if command -v shasum &>/dev/null; then
+            shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
+            return $?
+        fi
+
+        return 3
+    }
+
+    _build_file_size() {
+        local file="$1"
+        stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo 0
+    }
+
+    _build_manifest_add_entry() {
+        local file="$1"
+        local target="$2"
+        local format="$3"
+
+        [[ -z "$file" || ! -f "$file" ]] && return 0
+        [[ -z "$target" ]] && return 0
+
+        local name sha size
+        name=$(basename "$file")
+        sha=$(_build_sha256 "$file" 2>/dev/null || echo "")
+        size=$(_build_file_size "$file")
+
+        if [[ -z "$sha" ]]; then
+            log_warn "Unable to compute SHA256 for packaged artifact: $file"
+            return 0
+        fi
+        if [[ -z "$size" || "$size" -le 0 ]]; then
+            log_warn "Unable to determine size for packaged artifact: $file"
+            return 0
+        fi
+
+        local artifact_json
+        artifact_json=$(jq -nc \
+            --arg name "$name" \
+            --arg target "$target" \
+            --arg sha "$sha" \
+            --argjson size "$size" \
+            --arg format "$format" \
+            '{
+                name: $name,
+                target: $target,
+                sha256: $sha,
+                size_bytes: $size,
+                archive_format: $format,
+                signed: false,
+                signature_file: ""
+            }')
+
+        extra_manifest_entries+=("$artifact_json")
+    }
+
+    _build_get_archive_format() {
+        local tool="$1"
+        local os="$2"
+        local format=""
+        local config_dir="${DSR_CONFIG_DIR:-$HOME/.config/dsr}"
+        local tool_config="$config_dir/repos.d/${tool}.yaml"
+
+        if command -v yq &>/dev/null; then
+            if [[ -f "$tool_config" ]]; then
+                format=$(yq -r ".archive_format.${os} // \"\"" "$tool_config" 2>/dev/null)
+                [[ "$format" == "null" ]] && format=""
+                if [[ -n "$format" ]]; then
+                    echo "$format"
+                    return 0
+                fi
+                format=$(yq -r ".archive_format // \"\"" "$tool_config" 2>/dev/null)
+                if [[ "$format" != "null" && "$format" != "" && "$format" != "{"* ]]; then
+                    echo "$format"
+                    return 0
+                fi
+            fi
+
+            if [[ -f "$DSR_REPOS_FILE" ]]; then
+                format=$(yq -r ".tools.${tool}.archive_format.${os} // \"\"" "$DSR_REPOS_FILE" 2>/dev/null)
+                [[ "$format" == "null" ]] && format=""
+                if [[ -n "$format" ]]; then
+                    echo "$format"
+                    return 0
+                fi
+                format=$(yq -r ".tools.${tool}.archive_format // \"\"" "$DSR_REPOS_FILE" 2>/dev/null)
+                if [[ "$format" != "null" && "$format" != "" && "$format" != "{"* ]]; then
+                    echo "$format"
+                    return 0
+                fi
+            fi
+        fi
+
+        case "$os" in
+            windows) echo "zip" ;;
+            *) echo "tar.gz" ;;
+        esac
+    }
+
+    _build_get_include_files() {
+        local tool="$1"
+        local config_dir="${DSR_CONFIG_DIR:-$HOME/.config/dsr}"
+        local tool_config="$config_dir/repos.d/${tool}.yaml"
+
+        if command -v yq &>/dev/null; then
+            if [[ -f "$tool_config" ]]; then
+                yq -r '.include_files[]? // empty' "$tool_config" 2>/dev/null
+                return 0
+            fi
+            if [[ -f "$DSR_REPOS_FILE" ]]; then
+                yq -r ".tools.${tool}.include_files[]? // empty" "$DSR_REPOS_FILE" 2>/dev/null
+                return 0
+            fi
+        fi
+    }
+
+    _build_detect_compat_ext() {
+        local tool="$1"
+        local repo_path="$2"
+        local compat_pattern
+        compat_pattern=$(artifact_naming_get_compat_pattern "$tool" "$repo_path" 2>/dev/null || echo "")
+
+        case "$compat_pattern" in
+            *".tar.gz") echo "tar.gz" ;;
+            *".tgz") echo "tgz" ;;
+            *".zip") echo "zip" ;;
+            *".exe") echo "exe" ;;
+            *) echo "" ;;
+        esac
+    }
+
+    _build_detect_install_ext() {
+        local tool="$1"
+        local repo_path="$2"
+        local install_path
+        install_path=$(config_get_install_script_path "$tool" 2>/dev/null || echo "")
+        if [[ -z "$install_path" || -z "$repo_path" ]]; then
+            return 0
+        fi
+
+        local full_path="$repo_path/$install_path"
+        if [[ ! -f "$full_path" ]]; then
+            return 0
+        fi
+
+        local pattern=""
+        pattern=$(sed -n 's/.*TAR="\([^"]*\)".*/\1/p' "$full_path" | head -1 || true)
+        if [[ -z "$pattern" ]]; then
+            pattern=$(sed -n 's/.*[Aa][Ss][Ss][Ee][Tt]_[Nn][Aa][Mm][Ee]="\([^"]*\)".*/\1/p' "$full_path" | head -1 || true)
+        fi
+
+        case "$pattern" in
+            *".tar.gz") echo "tar.gz" ;;
+            *".tgz") echo "tgz" ;;
+            *".zip") echo "zip" ;;
+            *".exe") echo "exe" ;;
+            *) return 0 ;;
+        esac
+    }
+
+    _build_find_binary() {
+        local output_dir="$1"
+        local binary_name="$2"
+        local os="$3"
+        local candidate=""
+
+        if [[ "$os" == "windows" ]]; then
+            if [[ -f "$output_dir/${binary_name}.exe" ]]; then
+                candidate="$output_dir/${binary_name}.exe"
+            elif [[ -f "$output_dir/$binary_name" ]]; then
+                candidate="$output_dir/$binary_name"
+            fi
+        else
+            if [[ -f "$output_dir/$binary_name" ]]; then
+                candidate="$output_dir/$binary_name"
+            elif [[ -f "$output_dir/${binary_name}.exe" ]]; then
+                candidate="$output_dir/${binary_name}.exe"
+            fi
+        fi
+
+        [[ -n "$candidate" ]] && printf '%s\n' "$candidate"
+    }
+
+    _build_package_archive_for_target() {
+        local tool="$1"
+        local version="$2"
+        local target="$3"
+        local output_dir="$4"
+        local repo_path="$5"
+        local binary_name="$6"
+
+        local os arch
+        os="${target%/*}"
+        arch="${target#*/}"
+
+        local format
+        format=$(_build_get_archive_format "$tool" "$os")
+
+        local compat_ext
+        compat_ext=$(_build_detect_compat_ext "$tool" "$repo_path")
+        if [[ -z "$compat_ext" ]]; then
+            compat_ext=$(_build_detect_install_ext "$tool" "$repo_path")
+        fi
+        if [[ -n "$compat_ext" ]]; then
+            if [[ "$compat_ext" == "exe" ]]; then
+                format="none"
+            elif [[ "$format" != "$compat_ext" ]]; then
+                log_warn "Archive format for $tool $target ($format) differs from installer ($compat_ext); using $compat_ext"
+                format="$compat_ext"
+            fi
+        fi
+
+        if [[ -z "$format" || "$format" == "none" ]]; then
+            return 0
+        fi
+
+        local existing_format="${existing_archive_formats[$target]:-}"
+        if [[ -n "$existing_format" && "$existing_format" == "$format" ]]; then
+            log_info "Archive already produced for $tool $target ($format); skipping packaging"
+            return 0
+        fi
+
+        local names_json versioned_name
+        names_json=$(artifact_naming_generate_dual_for_tool "$tool" "$version" "$os" "$arch" "$format" "$repo_path" 2>/dev/null || echo "")
+        versioned_name=$(echo "$names_json" | jq -r '.versioned // empty' 2>/dev/null)
+        if [[ -z "$versioned_name" ]]; then
+            log_warn "Unable to resolve archive name for $tool $target ($format)"
+            return 0
+        fi
+
+        local archive_path="$output_dir/$versioned_name"
+
+        local binary_path
+        binary_path=$(_build_find_binary "$output_dir" "$binary_name" "$os" 2>/dev/null || echo "")
+        if [[ -z "$binary_path" || ! -f "$binary_path" ]]; then
+            log_warn "Binary not found for $tool $target; skipping archive packaging"
+            return 0
+        fi
+
+        local -a include_files=()
+        local include
+        while IFS= read -r include; do
+            [[ -z "$include" ]] && continue
+            include_files+=("$include")
+        done < <(_build_get_include_files "$tool" 2>/dev/null)
+
+        if [[ "$format" == "tar.gz" || "$format" == "tgz" ]]; then
+            if [[ -f "$archive_path" ]]; then
+                log_warn "Overwriting existing archive: $archive_path"
+            fi
+            local -a tar_args=()
+            tar_args=(-czf "$archive_path" -C "$output_dir" "$(basename "$binary_path")")
+            if [[ -n "$repo_path" ]]; then
+                for include in "${include_files[@]}"; do
+                    if [[ -f "$repo_path/$include" ]]; then
+                        tar_args+=(-C "$repo_path" "$include")
+                    else
+                        log_warn "Include file not found for $tool: $include"
+                    fi
+                done
+            fi
+            if tar "${tar_args[@]}"; then
+                _build_manifest_add_entry "$archive_path" "$target" "$format"
+            else
+                log_error "Failed to create archive: $archive_path"
+            fi
+            return 0
+        fi
+
+        if [[ "$format" == "zip" ]]; then
+            if ! command -v zip &>/dev/null; then
+                log_warn "zip not available; skipping archive packaging for $tool $target"
+                return 0
+            fi
+            if [[ -f "$archive_path" ]]; then
+                log_warn "Overwriting existing archive: $archive_path"
+            fi
+            local -a zip_inputs=("$binary_path")
+            if [[ -n "$repo_path" ]]; then
+                for include in "${include_files[@]}"; do
+                    if [[ -f "$repo_path/$include" ]]; then
+                        zip_inputs+=("$repo_path/$include")
+                    else
+                        log_warn "Include file not found for $tool: $include"
+                    fi
+                done
+            fi
+            if zip -j -q -FS "$archive_path" "${zip_inputs[@]}"; then
+                _build_manifest_add_entry "$archive_path" "$target" "$format"
+            else
+                log_error "Failed to create archive: $archive_path"
+            fi
+        fi
+    }
+
+    _build_package_archives() {
+        local tool="$1"
+        local version="$2"
+        local output_dir="$3"
+        local result_json="$4"
+        local target_list="$5"
+        local manifest_file="$6"
+
+        _dsr_require artifact_naming
+
+        local repo_path binary_name
+        repo_path=$(config_get_tool_field "$tool" "local_path" "" 2>/dev/null || echo "")
+        binary_name=$(config_get_tool_field "$tool" "binary_name" "" 2>/dev/null || echo "")
+        [[ -z "$binary_name" ]] && binary_name="$tool"
+
+        local -a targets=()
+        while IFS= read -r target; do
+            [[ -n "$target" ]] && targets+=("$target")
+        done < <(echo "$result_json" | jq -r '.targets[]? | select(.status == "success" or .status == "ok" or .status == "passed") | .target // empty' 2>/dev/null)
+
+        if [[ ${#targets[@]} -eq 0 ]]; then
+            while IFS= read -r target; do
+                [[ -n "$target" ]] && targets+=("$target")
+            done < <(echo "$result_json" | jq -r '.targets[]? | .target // empty' 2>/dev/null)
+        fi
+
+        if [[ ${#targets[@]} -eq 0 ]]; then
+            if [[ -n "$target_list" ]]; then
+                local target
+                for target in $target_list; do
+                    [[ -n "$target" ]] && targets+=("$target")
+                done
+            fi
+        fi
+
+        if [[ ${#targets[@]} -eq 0 ]]; then
+            return 0
+        fi
+
+        if [[ -n "$manifest_file" && -f "$manifest_file" ]]; then
+            local target format
+            while IFS=$'\t' read -r target format; do
+                [[ -z "$target" || -z "$format" || "$format" == "none" ]] && continue
+                existing_archive_formats["$target"]="$format"
+            done < <(jq -r '.artifacts[]? | [.target // "", .archive_format // ""] | @tsv' "$manifest_file" 2>/dev/null)
+        else
+            local target artifact_path
+            while IFS=$'\t' read -r target artifact_path; do
+                [[ -z "$target" || -z "$artifact_path" ]] && continue
+                case "$artifact_path" in
+                    *.tar.gz|*.tgz) existing_archive_formats["$target"]="tar.gz" ;;
+                    *.zip) existing_archive_formats["$target"]="zip" ;;
+                esac
+            done < <(echo "$result_json" | jq -r '.targets[]? | [.target, (.artifact_path // .artifact // "")] | @tsv' 2>/dev/null)
+        fi
+
+        for target in "${targets[@]}"; do
+            log_info "Packaging installer archive for $tool $target"
+            _build_package_archive_for_target "$tool" "$version" "$target" "$output_dir" "$repo_path" "$binary_name"
+        done
+    }
+
     if [[ $success -gt 0 ]]; then
         log_info "Collecting build artifacts into $output_dir..."
         while IFS= read -r file; do
@@ -2046,6 +2413,34 @@ EOF
     if [[ $success -gt 0 ]]; then
         # Generate manifest from orchestration result JSON
         act_generate_manifest "$result" "$manifest_file" 2>/dev/null || true
+    fi
+
+    if [[ $success -gt 0 ]]; then
+        _build_package_archives "$tool_name" "$version" "$output_dir" "$result" "$target_list" "$manifest_file"
+    fi
+
+    if [[ -f "$manifest_file" && ${#extra_manifest_entries[@]} -gt 0 ]]; then
+        local -A manifest_names=()
+        local entry entry_name
+        while IFS= read -r entry_name; do
+            [[ -n "$entry_name" ]] && manifest_names["$entry_name"]=1
+        done < <(jq -r '.artifacts[]?.name // empty' "$manifest_file" 2>/dev/null)
+
+        local -a filtered_entries=()
+        for entry in "${extra_manifest_entries[@]}"; do
+            entry_name=$(echo "$entry" | jq -r '.name // empty' 2>/dev/null)
+            if [[ -n "$entry_name" && -z "${manifest_names[$entry_name]:-}" ]]; then
+                filtered_entries+=("$entry")
+            fi
+        done
+
+        if [[ ${#filtered_entries[@]} -gt 0 ]]; then
+            local extra_json merged
+            extra_json=$(printf '%s\n' "${filtered_entries[@]}" | jq -s '.')
+            merged=$(jq --argjson extra "$extra_json" '.artifacts = (.artifacts // []) + $extra' "$manifest_file")
+            printf '%s\n' "$merged" > "$manifest_file"
+            log_info "Added ${#filtered_entries[@]} packaged artifact(s) to manifest"
+        fi
     fi
 
     # Output

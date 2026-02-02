@@ -527,16 +527,10 @@ artifact_naming_get_compat_pattern() {
         source "$script_dir/config.sh" 2>/dev/null || true
     fi
 
-    # Priority 1: Explicit install_script_compat
+    # Priority 1: Auto-detect from install_script_path
     local explicit_compat
     explicit_compat=$(config_get_install_script_compat "$tool" 2>/dev/null || echo "")
-    if [[ -n "$explicit_compat" ]]; then
-        _an_log_info "Using explicit install_script_compat: $explicit_compat"
-        echo "$explicit_compat"
-        return 0
-    fi
 
-    # Priority 2: Auto-detect from install_script_path
     local install_path
     install_path=$(config_get_install_script_path "$tool" 2>/dev/null || echo "")
     if [[ -n "$install_path" && -n "$repo_path" ]]; then
@@ -545,13 +539,24 @@ artifact_naming_get_compat_pattern() {
             local detected_pattern
             detected_pattern=$(artifact_naming_parse_install_script "$full_path")
             if [[ -n "$detected_pattern" ]]; then
-                _an_log_info "Auto-detected pattern from install.sh: $detected_pattern"
+                if [[ -n "$explicit_compat" && "$explicit_compat" != "$detected_pattern" ]]; then
+                    _an_log_warn "install_script_compat differs from install.sh; using install.sh pattern: $detected_pattern"
+                else
+                    _an_log_info "Auto-detected pattern from install.sh: $detected_pattern"
+                fi
                 echo "$detected_pattern"
                 return 0
             fi
         else
             _an_log_debug "Install script not found at: $full_path"
         fi
+    fi
+
+    # Priority 2: Explicit install_script_compat
+    if [[ -n "$explicit_compat" ]]; then
+        _an_log_info "Using explicit install_script_compat: $explicit_compat"
+        echo "$explicit_compat"
+        return 0
     fi
 
     # Priority 3: Derive from artifact_naming by stripping version
