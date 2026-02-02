@@ -2519,6 +2519,14 @@ EOF
 
     log_ok "Release created: $release_url"
 
+    # Cache existing release assets to avoid duplicate upload failures
+    local -A release_assets=()
+    if command -v jq &>/dev/null; then
+        while IFS= read -r asset_name; do
+            [[ -n "$asset_name" ]] && release_assets["$asset_name"]=1
+        done < <(echo "$release_json" | jq -r '.assets[]?.name // empty' 2>/dev/null)
+    fi
+
     # Collect files to upload
     local files_to_upload=()
     local uploaded_assets=()
@@ -2557,22 +2565,51 @@ EOF
         log_info "Resuming: ${#already_uploaded[@]} file(s) already uploaded"
     fi
 
+    # Map manifest artifact names to targets and formats (for dual-name uploads)
+    local -A manifest_targets=()
+    local -A manifest_formats=()
+    if $manifest_exists && [[ -f "$manifest_file" ]]; then
+        while IFS=$'\t' read -r name target format; do
+            [[ -z "$name" ]] && continue
+            manifest_targets["$name"]="$target"
+            manifest_formats["$name"]="$format"
+        done < <(jq -r '.artifacts[]? | [.name // .filename // "", .target // "", .archive_format // ""] | @tsv' "$manifest_file" 2>/dev/null)
+    fi
+
+    _release_save_state() {
+        jq -nc --argjson uploaded "$(printf '%s\n' "${uploaded_assets[@]}" | jq -sc '.')" \
+            '{uploaded: $uploaded}' > "$upload_state_file"
+    }
+
+    _release_record_uploaded() {
+        local name="$1"
+        local status="$2"
+        local size_bytes="$3"
+        local content_type="$4"
+        uploaded_assets+=("$(jq -nc \
+            --arg name "$name" \
+            --argjson size "$size_bytes" \
+            --arg content_type "$content_type" \
+            --arg status "$status" \
+            '{name: $name, size_bytes: $size, content_type: $content_type, status: $status}')")
+        _release_save_state
+    }
+
+    _release_record_failed() {
+        local name="$1"
+        local error="$2"
+        failed_assets+=("$(jq -nc \
+            --arg name "$name" \
+            --arg error "$error" \
+            '{name: $name, error: $error}')")
+    }
+
     # Upload each file
     local idx=0
     for file in "${files_to_upload[@]}"; do
         idx=$((idx + 1))
         local filename
         filename=$(basename "$file")
-
-        # Skip if already uploaded (resume mode)
-        local filename_pattern=" $filename "
-        if [[ " ${already_uploaded[*]} " =~ $filename_pattern ]]; then
-            log_info "[$idx/$total_files] Skipping (already uploaded): $filename"
-            skipped_assets+=("$filename")
-            continue
-        fi
-
-        log_info "[$idx/$total_files] Uploading: $filename"
 
         local size_bytes
         size_bytes=$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo 0)
@@ -2587,26 +2624,90 @@ EOF
             *.minisig) content_type="text/plain" ;;
         esac
 
+        # Dual-name upload for manifest artifacts (versioned + compat)
+        local manifest_target="${manifest_targets[$filename]:-}"
+        if [[ -n "$manifest_target" ]]; then
+            local os arch ext
+            os="${manifest_target%/*}"
+            arch="${manifest_target#*/}"
+            ext="${manifest_formats[$filename]:-}"
+            if [[ -z "$ext" ]]; then
+                case "$filename" in
+                    *.tar.gz) ext="tar.gz" ;;
+                    *.tgz) ext="tgz" ;;
+                    *.zip) ext="zip" ;;
+                esac
+            fi
+
+            if [[ -n "$ext" ]]; then
+                local names_json versioned_name compat_name same_names
+                names_json=$(artifact_naming_generate_dual_for_tool "$tool_name" "$version" "$os" "$arch" "$ext" "$local_path" 2>/dev/null || echo "")
+                versioned_name=$(echo "$names_json" | jq -r '.versioned // empty')
+                compat_name=$(echo "$names_json" | jq -r '.compat // empty')
+                same_names=$(echo "$names_json" | jq -r '.same // false')
+                [[ "$same_names" != "true" && "$same_names" != "false" ]] && same_names="false"
+
+                log_info "[$idx/$total_files] Uploading dual assets for: $filename"
+
+                # Upload versioned name (or skip if already present)
+                local versioned_pattern=" $versioned_name "
+                if [[ -n "${release_assets[$versioned_name]:-}" || " ${already_uploaded[*]} " =~ $versioned_pattern ]]; then
+                    log_info "  Skipping (already uploaded): $versioned_name"
+                    skipped_assets+=("$versioned_name")
+                else
+                    if gh_upload_asset_named "$upload_url" "$file" "$versioned_name" "$content_type" 2>&1; then
+                        log_ok "  Uploaded: $versioned_name ($size_bytes bytes)"
+                        _release_record_uploaded "$versioned_name" "uploaded" "$size_bytes" "$content_type"
+                        release_assets["$versioned_name"]=1
+                    else
+                        local upload_error="Upload failed for $versioned_name"
+                        log_error "  $upload_error"
+                        _release_record_failed "$versioned_name" "$upload_error"
+                    fi
+                fi
+
+                # Upload compat name if different
+                if [[ "$same_names" != "true" ]]; then
+                    local compat_pattern=" $compat_name "
+                    if [[ -n "${release_assets[$compat_name]:-}" || " ${already_uploaded[*]} " =~ $compat_pattern ]]; then
+                        log_info "  Skipping (already uploaded): $compat_name"
+                        skipped_assets+=("$compat_name")
+                    else
+                        if gh_upload_asset_named "$upload_url" "$file" "$compat_name" "$content_type" 2>&1; then
+                            log_ok "  Uploaded: $compat_name ($size_bytes bytes)"
+                            _release_record_uploaded "$compat_name" "uploaded" "$size_bytes" "$content_type"
+                            release_assets["$compat_name"]=1
+                        else
+                            local compat_error="Upload failed for $compat_name"
+                            log_error "  $compat_error"
+                            _release_record_failed "$compat_name" "$compat_error"
+                        fi
+                    fi
+                fi
+                continue
+            fi
+        fi
+
+        # Skip if already uploaded (resume mode or already in release)
+        local filename_pattern=" $filename "
+        if [[ " ${already_uploaded[*]} " =~ $filename_pattern || -n "${release_assets[$filename]:-}" ]]; then
+            log_info "[$idx/$total_files] Skipping (already uploaded): $filename"
+            skipped_assets+=("$filename")
+            continue
+        fi
+
+        log_info "[$idx/$total_files] Uploading: $filename"
+
         # Upload
         local upload_result
         if upload_result=$(gh_upload_asset "$upload_url" "$file" "$content_type" 2>&1); then
             log_ok "  Uploaded: $filename ($size_bytes bytes)"
-            uploaded_assets+=("$(jq -nc \
-                --arg name "$filename" \
-                --argjson size "$size_bytes" \
-                --arg content_type "$content_type" \
-                '{name: $name, size_bytes: $size, content_type: $content_type, status: "uploaded"}')")
-
-            # Update upload state for resume
-            jq -nc --argjson uploaded "$(printf '%s\n' "${uploaded_assets[@]}" | jq -sc '.')" \
-                '{uploaded: $uploaded}' > "$upload_state_file"
+            _release_record_uploaded "$filename" "uploaded" "$size_bytes" "$content_type"
+            release_assets["$filename"]=1
         else
             log_error "  Failed to upload: $filename"
             log_error "  Error: $upload_result"
-            failed_assets+=("$(jq -nc \
-                --arg name "$filename" \
-                --arg error "$upload_result" \
-                '{name: $name, error: $error}')")
+            _release_record_failed "$filename" "$upload_result"
         fi
     done
 
