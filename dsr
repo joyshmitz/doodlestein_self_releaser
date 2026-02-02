@@ -1681,14 +1681,6 @@ EOF
         return 4
     fi
 
-    # Set output directory default
-    local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
-    [[ -z "$output_dir" ]] && output_dir="$state_dir/artifacts"
-    if ! mkdir -p "$output_dir"; then
-        log_error "Failed to create output directory: $output_dir"
-        return 1
-    fi
-
     # Load tool config
     if ! act_load_repo_config "$tool_name"; then
         log_error "Tool '$tool_name' not found in repos.d"
@@ -1733,6 +1725,14 @@ EOF
         log_warn "Tag $tag does not exist in $local_path"
         log_info "Creating tag with: dsr version tag $tool_name"
         # For now, proceed anyway - the version might be in version files but not tagged
+    fi
+
+    # Set output directory default (tool-version)
+    local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
+    [[ -z "$output_dir" ]] && output_dir="$state_dir/artifacts/${tool_name}-${tag}"
+    if ! mkdir -p "$output_dir"; then
+        log_error "Failed to create output directory: $output_dir"
+        return 1
     fi
 
     log_info "Building $tool_name $version"
@@ -1901,8 +1901,148 @@ EOF
         log_debug "Parsed counts: total=$total success=$success failed=$failed"
     fi
 
+    # Collect artifacts into output directory for release/upload
+    local collect_failed=false
+    local collected_count=0
+    local collision_count=0
+    local -A collected_names=()
+
+    _build_collect_artifact_file() {
+        local src="$1"
+        local name dest
+
+        [[ -z "$src" || ! -f "$src" ]] && return 0
+
+        name=$(basename "$src")
+        dest="$output_dir/$name"
+
+        if [[ -n "${collected_names[$name]:-}" ]]; then
+            local prior="${collected_names[$name]}"
+            if cmp -s "$prior" "$src" 2>/dev/null; then
+                log_info "Duplicate artifact (same content): $name"
+                return 0
+            fi
+            log_error "Artifact name collision: $name"
+            log_error "  $prior"
+            log_error "  $src"
+            collision_count=$((collision_count + 1))
+            collect_failed=true
+            return 1
+        fi
+
+        if [[ -f "$dest" ]]; then
+            if cmp -s "$dest" "$src" 2>/dev/null; then
+                log_info "Artifact already present: $name"
+                collected_names["$name"]="$src"
+                return 0
+            fi
+            log_warn "Overwriting existing artifact: $name"
+        fi
+
+        if cp "$src" "$dest"; then
+            collected_names["$name"]="$src"
+            collected_count=$((collected_count + 1))
+            return 0
+        fi
+
+        log_error "Failed to copy artifact: $src"
+        collect_failed=true
+        return 1
+    }
+
+    _build_collect_artifact_zip() {
+        local zip_path="$1"
+        local tag_filter="$2"
+        local version_stripped="${tag_filter#v}"
+
+        if ! command -v unzip &>/dev/null; then
+            log_error "unzip required to extract act artifacts: $zip_path"
+            collect_failed=true
+            return 1
+        fi
+
+        local entries
+        entries=$(unzip -Z1 "$zip_path" 2>/dev/null)
+        if [[ -z "$entries" ]]; then
+            log_error "Failed to read zip entries: $zip_path"
+            collect_failed=true
+            return 1
+        fi
+
+        local -a matched_entries=()
+        while IFS= read -r entry; do
+            [[ -z "$entry" ]] && continue
+            [[ "$entry" == */ ]] && continue
+            if [[ "$entry" == *"$tag_filter"* || "$entry" == *"$version_stripped"* ]]; then
+                matched_entries+=("$entry")
+            fi
+        done <<< "$entries"
+
+        local -a use_entries=()
+        if [[ ${#matched_entries[@]} -gt 0 ]]; then
+            use_entries=("${matched_entries[@]}")
+        else
+            while IFS= read -r entry; do
+                [[ -z "$entry" ]] && continue
+                [[ "$entry" == */ ]] && continue
+                use_entries+=("$entry")
+            done <<< "$entries"
+        fi
+
+        local entry
+        for entry in "${use_entries[@]}"; do
+            local dest_name dest_path
+            dest_name=$(basename "$entry")
+            dest_path="$output_dir/$dest_name"
+
+            if [[ -n "${collected_names[$dest_name]:-}" ]]; then
+                log_error "Artifact name collision: $dest_name (from $zip_path)"
+                collision_count=$((collision_count + 1))
+                collect_failed=true
+                continue
+            fi
+
+            if [[ -f "$dest_path" ]]; then
+                log_warn "Overwriting existing artifact: $dest_name"
+            fi
+
+            if unzip -p "$zip_path" "$entry" > "$dest_path" 2>/dev/null; then
+                collected_names["$dest_name"]="$zip_path::$entry"
+                collected_count=$((collected_count + 1))
+            else
+                log_error "Failed to extract $entry from $zip_path"
+                collect_failed=true
+            fi
+        done
+    }
+
+    if [[ $success -gt 0 ]]; then
+        log_info "Collecting build artifacts into $output_dir..."
+        while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            _build_collect_artifact_file "$file"
+        done < <(echo "$result" | jq -r '.targets[]? | .artifact_path // empty' 2>/dev/null)
+
+        while IFS= read -r dir; do
+            [[ -z "$dir" || ! -d "$dir" ]] && continue
+            while IFS= read -r -d '' file; do
+                if [[ "$file" == *.zip ]]; then
+                    _build_collect_artifact_zip "$file" "$tag"
+                else
+                    _build_collect_artifact_file "$file"
+                fi
+            done < <(find "$dir" -type f -print0 2>/dev/null)
+        done < <(echo "$result" | jq -r '.targets[]? | .artifact_dir // empty' 2>/dev/null)
+
+        if $collect_failed; then
+            log_error "Artifact collection encountered errors"
+        else
+            log_info "Collected $collected_count artifact(s) into $output_dir"
+        fi
+    fi
+
     # Generate manifest
-    local manifest_file="$output_dir/${tool_name}-${version}-manifest.json"
+    local manifest_file="$output_dir/${tool_name}-${tag}-manifest.json"
     if [[ $success -gt 0 ]]; then
         # Generate manifest from orchestration result JSON
         act_generate_manifest "$result" "$manifest_file" 2>/dev/null || true
@@ -1959,7 +2099,7 @@ EOF
     fi
 
     # Return appropriate exit code
-    if [[ $failed -eq 0 && $success -gt 0 ]]; then
+    if [[ $failed -eq 0 && $success -gt 0 && $collect_failed == false ]]; then
         return 0
     elif [[ $success -gt 0 ]]; then
         return 1  # Partial success
@@ -2245,7 +2385,7 @@ cmd_release() {
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --tool|-t)
+            --tool|-t|--repo)
                 tool_name="$2"
                 shift 2
                 ;;
@@ -2404,6 +2544,7 @@ EOF
         log_info "Available tools: $(act_list_tools 2>/dev/null | tr '\n' ' ')"
         return 4
     fi
+    _dsr_require artifact_naming
 
     # Get repository info
     local repo local_path
@@ -2446,7 +2587,7 @@ EOF
     # Determine artifacts directory
     local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
     if [[ -z "$artifacts_dir" ]]; then
-        artifacts_dir="$state_dir/artifacts/$tool_name/$version"
+        artifacts_dir="$state_dir/artifacts/${tool_name}-${tag}"
     fi
 
     if [[ ! -d "$artifacts_dir" ]]; then
@@ -2456,10 +2597,10 @@ EOF
     fi
 
     # Find manifest
-    local manifest_file="$artifacts_dir/${tool_name}-${version}-manifest.json"
+    local manifest_file="$artifacts_dir/${tool_name}-${tag}-manifest.json"
     if [[ ! -f "$manifest_file" ]]; then
         # Try alternate location
-        manifest_file="$state_dir/artifacts/${tool_name}-${version}-manifest.json"
+        manifest_file="$state_dir/artifacts/${tool_name}-${tag}-manifest.json"
     fi
 
     local manifest_exists=false
@@ -2575,7 +2716,7 @@ EOF
     log_info "Uploading $total_files file(s)..."
 
     # Upload state for resume
-    local upload_state_file="$state_dir/releases/${tool_name}-${version}-upload.json"
+    local upload_state_file="$state_dir/releases/${tool_name}-${tag}-upload.json"
     if ! mkdir -p "$(dirname "$upload_state_file")"; then
         log_error "Failed to create releases directory"
         return 1
@@ -2671,11 +2812,13 @@ EOF
             os="${manifest_target%/*}"
             arch="${manifest_target#*/}"
             ext="${manifest_formats[$filename]:-}"
-            if [[ -z "$ext" ]]; then
+            if [[ -z "$ext" || "$ext" == "none" ]]; then
                 case "$filename" in
                     *.tar.gz) ext="tar.gz" ;;
                     *.tgz) ext="tgz" ;;
                     *.zip) ext="zip" ;;
+                    *.exe) ext="exe" ;;
+                    *) ext="" ;;
                 esac
             fi
 
@@ -2687,50 +2830,45 @@ EOF
                 same_names=$(echo "$names_json" | jq -r '.same // false')
                 [[ "$same_names" != "true" && "$same_names" != "false" ]] && same_names="false"
 
-                log_info "[$idx/$total_files] Uploading dual assets for: $filename"
-
-                # Upload versioned name (overwrite if already present)
-                local versioned_pattern=" $versioned_name "
-                if [[ " ${already_uploaded[*]} " =~ $versioned_pattern ]]; then
-                    log_info "  Skipping (already uploaded): $versioned_name"
-                    skipped_assets+=("$versioned_name")
+                # If naming couldn't be resolved, fall back to original upload flow
+                if [[ -z "$versioned_name" && -z "$compat_name" ]]; then
+                    log_warn "No naming pattern resolved for $filename; uploading original name only"
                 else
-                    if _release_delete_asset "$versioned_name"; then
-                        if gh_upload_asset_named "$upload_url" "$file" "$versioned_name" "$content_type" 2>&1; then
-                            log_ok "  Uploaded: $versioned_name ($size_bytes bytes)"
-                            _release_record_uploaded "$versioned_name" "uploaded" "$size_bytes" "$content_type"
-                        else
-                            local upload_error="Upload failed for $versioned_name"
-                            log_error "  $upload_error"
-                            _release_record_failed "$versioned_name" "$upload_error"
-                        fi
-                    else
-                        _release_record_failed "$versioned_name" "Failed to delete existing asset"
+                    # Upload original + variant names (deduped)
+                    local -a upload_names=()
+                    upload_names+=("$filename")
+                    if [[ -n "$versioned_name" && "$versioned_name" != "$filename" ]]; then
+                        upload_names+=("$versioned_name")
                     fi
-                fi
+                    if [[ -n "$compat_name" && "$compat_name" != "$filename" && "$compat_name" != "$versioned_name" ]]; then
+                        upload_names+=("$compat_name")
+                    fi
 
-                # Upload compat name if different
-                if [[ "$same_names" != "true" ]]; then
-                    local compat_pattern=" $compat_name "
-                    if [[ " ${already_uploaded[*]} " =~ $compat_pattern ]]; then
-                        log_info "  Skipping (already uploaded): $compat_name"
-                        skipped_assets+=("$compat_name")
-                    else
-                        if _release_delete_asset "$compat_name"; then
-                            if gh_upload_asset_named "$upload_url" "$file" "$compat_name" "$content_type" 2>&1; then
-                                log_ok "  Uploaded: $compat_name ($size_bytes bytes)"
-                                _release_record_uploaded "$compat_name" "uploaded" "$size_bytes" "$content_type"
+                    log_info "[$idx/$total_files] Uploading asset variants for: $filename"
+
+                    local upload_name
+                    for upload_name in "${upload_names[@]}"; do
+                        local name_pattern=" $upload_name "
+                        if [[ " ${already_uploaded[*]} " =~ $name_pattern ]]; then
+                            log_info "  Skipping (already uploaded): $upload_name"
+                            skipped_assets+=("$upload_name")
+                            continue
+                        fi
+                        if _release_delete_asset "$upload_name"; then
+                            if gh_upload_asset_named "$upload_url" "$file" "$upload_name" "$content_type" 2>&1; then
+                                log_ok "  Uploaded: $upload_name ($size_bytes bytes)"
+                                _release_record_uploaded "$upload_name" "uploaded" "$size_bytes" "$content_type"
                             else
-                                local compat_error="Upload failed for $compat_name"
-                                log_error "  $compat_error"
-                                _release_record_failed "$compat_name" "$compat_error"
+                                local upload_error="Upload failed for $upload_name"
+                                log_error "  $upload_error"
+                                _release_record_failed "$upload_name" "$upload_error"
                             fi
                         else
-                            _release_record_failed "$compat_name" "Failed to delete existing asset"
+                            _release_record_failed "$upload_name" "Failed to delete existing asset"
                         fi
-                    fi
+                    done
+                    continue
                 fi
-                continue
             fi
         fi
 
@@ -3091,9 +3229,9 @@ EOF
 
     # Load build manifest if available
     local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
-    local manifest_file="$state_dir/artifacts/$tool_name/$version/${tool_name}-${version}-manifest.json"
+    local manifest_file="$state_dir/artifacts/${tool_name}-${tag}/${tool_name}-${tag}-manifest.json"
     if [[ ! -f "$manifest_file" ]]; then
-        manifest_file="$state_dir/artifacts/${tool_name}-${version}-manifest.json"
+        manifest_file="$state_dir/artifacts/${tool_name}-${tag}-manifest.json"
     fi
 
     local manifest_exists=false
@@ -3245,7 +3383,7 @@ EOF
     # Fix missing assets if requested
     if $fix_missing && [[ ${#missing_assets[@]} -gt 0 ]]; then
         log_info "Attempting to re-upload ${#missing_assets[@]} missing asset(s)..."
-        local artifacts_dir="$state_dir/artifacts/$tool_name/$version"
+        local artifacts_dir="$state_dir/artifacts/${tool_name}-${tag}"
 
         for missing in "${missing_assets[@]}"; do
             local file_path="$artifacts_dir/$missing"
@@ -3496,14 +3634,6 @@ EOF
     log_info "Starting fallback pipeline for $tool_name (run_id: $run_id)"
     log_set_tool "$tool_name"
 
-    # Set output directory default
-    local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
-    [[ -z "$output_dir" ]] && output_dir="$state_dir/artifacts"
-    if ! mkdir -p "$output_dir"; then
-        log_error "Failed to create output directory: $output_dir"
-        return 1
-    fi
-
     # Load tool config
     if ! act_load_repo_config "$tool_name" 2>/dev/null; then
         log_error "Tool '$tool_name' not found in repos.d"
@@ -3545,6 +3675,14 @@ EOF
     local tag
     tag=$(git_ops_version_to_tag "$version")
     local version_num="${tag#v}"
+
+    # Set output directory default (tool-version)
+    local state_dir="${DSR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dsr}"
+    [[ -z "$output_dir" ]] && output_dir="$state_dir/artifacts/${tool_name}-${tag}"
+    if ! mkdir -p "$output_dir"; then
+        log_error "Failed to create output directory: $output_dir"
+        return 1
+    fi
 
     if $DRY_RUN; then
         log_info "[dry-run] Would execute fallback pipeline:"

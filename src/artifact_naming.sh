@@ -300,24 +300,38 @@ artifact_naming_generate_dual() {
     # Strip leading 'v' from version for filename
     local version_stripped="${version#v}"
 
+    local ext_value="$ext"
+    [[ "$ext_value" == "none" ]] && ext_value=""
+
     # Generate versioned name (default pattern)
-    local versioned="${tool}-${version_stripped}-${os}-${arch}.${ext}"
+    local versioned
+    if [[ -n "$ext_value" ]]; then
+        versioned="${tool}-${version_stripped}-${os}-${arch}.${ext_value}"
+    else
+        versioned="${tool}-${version_stripped}-${os}-${arch}"
+    fi
 
     # Generate compat name
     local compat
     if [[ -n "$compat_pattern" ]]; then
         # Use explicit pattern if provided
-        compat=$(artifact_naming_substitute "$compat_pattern" "$tool" "$version" "$os" "$arch" "$ext")
-        if [[ "$compat" == *".${ext}" ]]; then
-            : # Extension already present
-        elif [[ "$compat" =~ \.(tar\.gz|tgz|zip|exe)$ ]]; then
-            : # Extension already present (different from ext)
-        else
-            compat="${compat}.${ext}"
+        compat=$(artifact_naming_substitute "$compat_pattern" "$tool" "$version" "$os" "$arch" "$ext_value")
+        if [[ -n "$ext_value" ]]; then
+            if [[ "$compat" == *".${ext_value}" ]]; then
+                : # Extension already present
+            elif [[ "$compat" =~ \.(tar\.gz|tgz|zip|exe)$ ]]; then
+                : # Extension already present (different from ext)
+            else
+                compat="${compat}.${ext_value}"
+            fi
         fi
     else
         # Default compat: no version
-        compat="${tool}-${os}-${arch}.${ext}"
+        if [[ -n "$ext_value" ]]; then
+            compat="${tool}-${os}-${arch}.${ext_value}"
+        else
+            compat="${tool}-${os}-${arch}"
+        fi
     fi
 
     _an_log_debug "Versioned: $versioned"
@@ -571,12 +585,28 @@ artifact_naming_generate_dual_for_tool() {
     local ext="${5:-tar.gz}"
     local repo_path="${6:-}"
 
+    # Ensure config helpers are available
+    if ! declare -F config_get_tool_field &>/dev/null; then
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        # shellcheck source=./config.sh
+        source "$script_dir/config.sh" 2>/dev/null || true
+    fi
+
+    # Resolve naming base (prefer tool_name or binary_name from config)
+    local naming_name
+    naming_name=$(config_get_tool_field "$tool" "tool_name" "" 2>/dev/null || echo "")
+    if [[ -z "$naming_name" ]]; then
+        naming_name=$(config_get_tool_field "$tool" "binary_name" "" 2>/dev/null || echo "")
+    fi
+    [[ -z "$naming_name" ]] && naming_name="$tool"
+
     # Get compat pattern using precedence logic
     local compat_pattern
     compat_pattern=$(artifact_naming_get_compat_pattern "$tool" "$repo_path")
 
     # Generate dual names
-    artifact_naming_generate_dual "$tool" "$version" "$os" "$arch" "$ext" "$compat_pattern"
+    artifact_naming_generate_dual "$naming_name" "$version" "$os" "$arch" "$ext" "$compat_pattern"
 }
 
 # Export functions

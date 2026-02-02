@@ -1814,6 +1814,118 @@ act_generate_manifest() {
         seen_paths+=("$file")
     }
 
+    _act_sha256_zip_entry() {
+        local zip_file="$1"
+        local entry="$2"
+
+        if command -v sha256sum &>/dev/null; then
+            unzip -p "$zip_file" "$entry" 2>/dev/null | sha256sum | awk '{print $1}'
+            return 0
+        fi
+
+        if command -v shasum &>/dev/null; then
+            unzip -p "$zip_file" "$entry" 2>/dev/null | shasum -a 256 | awk '{print $1}'
+            return 0
+        fi
+
+        return 3
+    }
+
+    _act_zip_entry_size() {
+        local zip_file="$1"
+        local entry="$2"
+        unzip -p "$zip_file" "$entry" 2>/dev/null | wc -c | tr -d ' '
+    }
+
+    _act_manifest_add_zip_entries() {
+        local zip_file="$1"
+        local target="$2"
+        local version_tag="$manifest_version"
+        local version_stripped="${manifest_version#v}"
+
+        if ! command -v unzip &>/dev/null; then
+            _log_warn "unzip not available; treating $zip_file as artifact"
+            _act_manifest_add_file "$zip_file" "$target"
+            return 0
+        fi
+
+        local entries
+        entries=$(unzip -Z1 "$zip_file" 2>/dev/null)
+        if [[ -z "$entries" ]]; then
+            _log_warn "No entries found in zip artifact: $zip_file"
+            return 0
+        fi
+
+        local -a matched_entries=()
+        while IFS= read -r entry; do
+            [[ -z "$entry" || "$entry" == */ ]] && continue
+            if [[ "$entry" == *"$version_tag"* || "$entry" == *"$version_stripped"* ]]; then
+                matched_entries+=("$entry")
+            fi
+        done <<< "$entries"
+
+        local -a use_entries=()
+        if [[ ${#matched_entries[@]} -gt 0 ]]; then
+            use_entries=("${matched_entries[@]}")
+        else
+            while IFS= read -r entry; do
+                [[ -z "$entry" || "$entry" == */ ]] && continue
+                use_entries+=("$entry")
+            done <<< "$entries"
+        fi
+
+        local entry
+        for entry in "${use_entries[@]}"; do
+            local name
+            name=$(basename "$entry")
+
+            case "$name" in
+                *.minisig|*.sig|*.sha256|*.sha512|SHA256SUMS*|*.sbom.*|*.intoto.jsonl)
+                    continue
+                    ;;
+            esac
+
+            local seen_key="${zip_file}::${entry}"
+            for seen in "${seen_paths[@]}"; do
+                [[ "$seen" == "$seen_key" ]] && continue 2
+            done
+
+            local sha size format
+            sha=$(_act_sha256_zip_entry "$zip_file" "$entry" 2>/dev/null || echo "")
+            size=$(_act_zip_entry_size "$zip_file" "$entry")
+            format=$(_act_archive_format "$name")
+
+            if [[ -z "$sha" ]]; then
+                _log_warn "Unable to compute SHA256 for artifact: $zip_file::$entry"
+                continue
+            fi
+            if [[ -z "$size" || "$size" -le 0 ]]; then
+                _log_warn "Unable to determine size for artifact: $zip_file::$entry"
+                continue
+            fi
+
+            local artifact_json
+            artifact_json=$(jq -nc \
+                --arg name "$name" \
+                --arg target "$target" \
+                --arg sha "$sha" \
+                --argjson size "$size" \
+                --arg format "$format" \
+                '{
+                    name: $name,
+                    target: $target,
+                    sha256: $sha,
+                    size_bytes: $size,
+                    archive_format: $format,
+                    signed: false,
+                    signature_file: ""
+                }')
+
+            artifacts+=("$artifact_json")
+            seen_paths+=("$seen_key")
+        done
+    }
+
     while IFS= read -r target_json; do
         [[ -z "$target_json" ]] && continue
         local target
@@ -1829,7 +1941,11 @@ act_generate_manifest() {
 
         if [[ -n "$artifact_dir" && -d "$artifact_dir" ]]; then
             while IFS= read -r -d '' file; do
-                _act_manifest_add_file "$file" "$target"
+                if [[ "$file" == *.zip ]]; then
+                    _act_manifest_add_zip_entries "$file" "$target"
+                else
+                    _act_manifest_add_file "$file" "$target"
+                fi
             done < <(find "$artifact_dir" -type f -print0 2>/dev/null)
         fi
     done < <(echo "$result_json" | jq -c '.targets[]?' 2>/dev/null || true)
