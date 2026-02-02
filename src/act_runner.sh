@@ -1540,13 +1540,8 @@ act_orchestrate_build() {
             full_output=$(act_run_workflow "$local_path" "$workflow" "$job" "push" "$version" "${act_args[@]}" 2>&1) || exit_code=$?
 
             # Extract JSON from mixed output (act logs + JSON at end)
-            # The JSON starts with a standalone { line and ends with standalone }
-            result=$(echo "$full_output" | awk '
-                /^{$/ { json = ""; capturing = 1 }
-                capturing { json = json $0 "\n" }
-                /^}$/ && capturing { capturing = 0 }
-                END { printf "%s", json }
-            ')
+            # jq -nc outputs single-line compact JSON, so match lines that start with { and end with }
+            result=$(echo "$full_output" | grep '^{.*}$' | tail -1)
 
             # Fallback if no JSON found
             if [[ -z "$result" ]] || ! echo "$result" | jq -e '.' &>/dev/null; then
