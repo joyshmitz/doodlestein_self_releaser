@@ -174,6 +174,84 @@ Standard targets supported by dsr:
 | darwin/amd64 | macOS | Intel | tar.gz | mmini (Rosetta) |
 | windows/amd64 | Windows | x86_64 | zip | wlap |
 
+## Dual Naming for Install Script Compatibility
+
+dsr uploads artifacts with TWO naming conventions to ensure compatibility with both explicit version downloads and install.sh scripts:
+
+1. **Versioned name**: `{tool}-{version}-{os}-{arch}.{ext}` — For explicit version downloads
+2. **Compat name**: `{tool}-{os}-{arch}.{ext}` — For install.sh scripts expecting unversioned names
+
+### Configuration
+
+Configure dual naming in `repos.d/{tool}.yaml`:
+
+```yaml
+tool_name: cass
+
+# Versioned naming (for explicit downloads)
+artifact_naming: "${name}-${version}-${os}_${arch}"
+
+# Option 1: Explicit compat pattern (recommended for edge cases)
+install_script_compat: "${name}-${os}-${arch}"
+
+# Option 2: Auto-detect from install.sh (recommended for most cases)
+install_script_path: install.sh
+```
+
+### Precedence Rules
+
+When generating compat names, dsr uses this precedence:
+
+1. **install_script_compat** — Explicit override, highest priority
+2. **install_script_path** — Parse the script to auto-detect the expected pattern
+3. **Fallback heuristic** — Strip version from artifact_naming
+
+### Variable Substitution
+
+Patterns support these variables:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `${name}` | Tool name | `cass` |
+| `${version}` | Version (stripped of 'v' prefix) | `0.1.64` |
+| `${os}` | Operating system | `darwin` |
+| `${arch}` | Architecture | `arm64` |
+| `${target}` | Combined os-arch | `darwin-arm64` |
+| `${ext}` | File extension | `.tar.gz` |
+
+### Examples
+
+**Versioned downloads (explicit version):**
+```
+cass-0.1.64-darwin_arm64.tar.gz
+rch-1.0.1-linux-amd64.tar.gz
+```
+
+**Install.sh compatible (unversioned):**
+```
+cass-darwin-arm64.tar.gz
+rch-linux-amd64.tar.gz
+```
+
+### Checksums
+
+Checksum files include entries for BOTH naming variants:
+```
+abc123...  cass-0.1.64-darwin_arm64.tar.gz
+abc123...  cass-darwin-arm64.tar.gz
+```
+
+### Validation
+
+Use `dsr repos validate` to check naming consistency:
+```bash
+# Validate all registered repos
+dsr repos validate
+
+# Validate specific repo
+dsr repos validate --repo cass
+```
+
 ## Validation
 
 Artifact names can be validated against the regex:
