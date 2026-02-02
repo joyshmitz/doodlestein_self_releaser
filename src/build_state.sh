@@ -446,7 +446,7 @@ build_state_update_status() {
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
   # Update status and timestamp
-  local tmp_file="$state_file.tmp"
+  local tmp_file="${state_file}.tmp.$$"
   if ! jq --arg status "$status" --arg now "$now" \
     '.status = $status | .updated_at = $now' "$state_file" > "$tmp_file" 2>/dev/null; then
     log_error "Failed to update build state: jq parse error"
@@ -992,7 +992,19 @@ build_state_resume() {
   local actual_run_id
   actual_run_id=$(echo "$state" | jq -r '.run_id')
 
-  # Build resume plan
+  # Build resume plan - handle empty arrays properly
+  local retryable_json exceeded_json
+  if [[ ${#retryable_hosts[@]} -gt 0 ]]; then
+    retryable_json=$(printf '%s\n' "${retryable_hosts[@]}" | jq -R -s 'split("\n") | map(select(. != ""))')
+  else
+    retryable_json="[]"
+  fi
+  if [[ ${#exceeded_hosts[@]} -gt 0 ]]; then
+    exceeded_json=$(printf '%s\n' "${exceeded_hosts[@]}" | jq -R -s 'split("\n") | map(select(. != ""))')
+  else
+    exceeded_json="[]"
+  fi
+
   jq -nc \
     --arg tool "$tool" \
     --arg version "$version" \
@@ -1001,8 +1013,8 @@ build_state_resume() {
     --argjson completed "$completed_hosts" \
     --argjson failed "$failed_hosts" \
     --argjson pending "$pending_hosts" \
-    --argjson retryable "$(printf '%s\n' "${retryable_hosts[@]:-}" | jq -R -s 'split("\n") | map(select(. != ""))')" \
-    --argjson exceeded "$(printf '%s\n' "${exceeded_hosts[@]:-}" | jq -R -s 'split("\n") | map(select(. != ""))')" \
+    --argjson retryable "$retryable_json" \
+    --argjson exceeded "$exceeded_json" \
     '{
       can_resume: true,
       tool: $tool,

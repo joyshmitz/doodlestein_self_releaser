@@ -46,7 +46,20 @@ _cs_log_debug() { [[ "${CS_DEBUG:-}" == "1" ]] && echo "${_CS_BLUE}[checksum-syn
 _cs_is_safe_path() {
     local path="$1"
     local abs_path
-    abs_path=$(realpath -m "$path" 2>/dev/null || echo "$path")
+    # realpath -m is GNU-only; use portable fallback for macOS
+    if command -v realpath &>/dev/null && realpath -m / &>/dev/null 2>&1; then
+        abs_path=$(realpath -m "$path" 2>/dev/null || echo "$path")
+    elif [[ -e "$path" ]]; then
+        # Path exists, use cd + pwd to resolve
+        abs_path=$(cd "$(dirname "$path")" && pwd)/$(basename "$path")
+    else
+        # Path doesn't exist, just clean it up minimally
+        # Remove trailing slashes and normalize // to /
+        abs_path="${path%/}"
+        abs_path="${abs_path//\/\//\/}"
+        # If relative, prepend PWD
+        [[ "$abs_path" != /* ]] && abs_path="$PWD/$abs_path"
+    fi
 
     for protected in "${CHECKSUM_SYNC_PROTECTED_PATHS[@]}"; do
         # Check for exact match OR path is inside protected directory
@@ -139,7 +152,9 @@ checksum_generate() {
 
         local sha256
         sha256=$(_cs_sha256 "$file" 2>/dev/null || echo "")
-        checksums+="$sha256  $filename"$'\n'
+        if [[ -n "$sha256" ]]; then
+            checksums+="$sha256  $filename"$'\n'
+        fi
     done < <(find "$dir" -maxdepth 1 -type f -name "$include_pattern" 2>/dev/null | sort)
 
     if [[ -n "$output" ]]; then

@@ -385,7 +385,14 @@ config_show() {
             if [[ -z "$key" || "$k" == "$key" ]]; then
                 $first || echo ","
                 first=false
-                printf '    "%s": "%s"' "$k" "${DSR_CONFIG[$k]}"
+                # Escape value for JSON (backslashes, quotes, newlines)
+                local escaped_val="${DSR_CONFIG[$k]}"
+                escaped_val="${escaped_val//\\/\\\\}"
+                escaped_val="${escaped_val//\"/\\\"}"
+                escaped_val="${escaped_val//$'\n'/\\n}"
+                escaped_val="${escaped_val//$'\r'/\\r}"
+                escaped_val="${escaped_val//$'\t'/\\t}"
+                printf '    "%s": "%s"' "$k" "$escaped_val"
             fi
         done
         echo ""

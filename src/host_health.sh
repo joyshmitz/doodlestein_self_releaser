@@ -373,7 +373,8 @@ _hh_check_disk_space() {
     local usage_percent available_kb available_gb status
     usage_percent=$(echo "$df_output" | awk '{print $1}' | tr -d '%')
     available_kb=$(echo "$df_output" | awk '{print $2}')
-    available_gb=$(echo "scale=2; $available_kb / 1048576" | bc 2>/dev/null || echo "0")
+    # Use awk for division (more portable than bc which may not be installed)
+    available_gb=$(awk -v kb="$available_kb" 'BEGIN {printf "%.2f", kb / 1048576}')
 
     if [[ $usage_percent -gt $_HH_DISK_ERROR_THRESHOLD ]]; then
         status="error"
