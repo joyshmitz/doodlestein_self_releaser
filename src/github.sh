@@ -708,7 +708,10 @@ gh_upload_asset_dual() {
     local versioned_name compat_name same_names
     versioned_name=$(echo "$names_json" | jq -r '.versioned')
     compat_name=$(echo "$names_json" | jq -r '.compat')
-    same_names=$(echo "$names_json" | jq -r '.same')
+    same_names=$(echo "$names_json" | jq -r '.same // false')
+
+    # Ensure same_names is a valid JSON boolean for --argjson
+    [[ "$same_names" != "true" && "$same_names" != "false" ]] && same_names="false"
 
     local content_type="application/octet-stream"
     case "$ext" in

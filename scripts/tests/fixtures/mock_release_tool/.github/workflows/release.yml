@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Build linux/amd64
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${GITHUB_REF_NAME}" -o dist/mock_release_tool ./cmd/mock_release_tool
+          tar -C dist -czf dist/mock_release_tool-${GITHUB_REF_NAME}-linux-amd64.tar.gz mock_release_tool
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mock_release_tool-${{ github.ref_name }}-linux-amd64.tar.gz
+          path: dist/mock_release_tool-${{ github.ref_name }}-linux-amd64.tar.gz
+
+  build-darwin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Build darwin/arm64
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=${GITHUB_REF_NAME}" -o dist/mock_release_tool ./cmd/mock_release_tool
+          tar -C dist -czf dist/mock_release_tool-${GITHUB_REF_NAME}-darwin-arm64.tar.gz mock_release_tool
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mock_release_tool-${{ github.ref_name }}-darwin-arm64.tar.gz
+          path: dist/mock_release_tool-${{ github.ref_name }}-darwin-arm64.tar.gz
+
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Build windows/amd64
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=${GITHUB_REF_NAME}" -o dist/mock_release_tool.exe ./cmd/mock_release_tool
+          (cd dist && zip -q mock_release_tool-${GITHUB_REF_NAME}-windows-amd64.zip mock_release_tool.exe)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mock_release_tool-${{ github.ref_name }}-windows-amd64.zip
+          path: dist/mock_release_tool-${{ github.ref_name }}-windows-amd64.zip

@@ -4574,10 +4574,18 @@ _validate_artifact_naming() {
         fi
     fi
 
-    # Build result JSON
+    # Build result JSON (handle empty arrays defensively)
     local msgs_json recs_json
-    msgs_json=$(printf '%s\n' "${messages[@]}" 2>/dev/null | jq -R . | jq -sc '.')
-    recs_json=$(printf '%s\n' "${recommendations[@]}" 2>/dev/null | jq -R . | jq -sc '.')
+    if [[ ${#messages[@]} -gt 0 ]]; then
+        msgs_json=$(printf '%s\n' "${messages[@]}" | jq -R . | jq -sc '.')
+    else
+        msgs_json="[]"
+    fi
+    if [[ ${#recommendations[@]} -gt 0 ]]; then
+        recs_json=$(printf '%s\n' "${recommendations[@]}" | jq -R . | jq -sc '.')
+    else
+        recs_json="[]"
+    fi
 
     jq -nc \
         --arg status "$status" \

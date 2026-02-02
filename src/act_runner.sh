@@ -1054,7 +1054,7 @@ act_ensure_remote_repo_ready() {
         test_dir_cmd="if exist \"$win_path\" (exit 0) else (exit 1)"
         test_git_cmd="if exist \"$win_path\\.git\" (exit 0) else (exit 1)"
         clone_cmd="git clone \"$repo_url\" \"$win_path\""
-        pull_cmd="cd /d \"$win_path\" && git fetch --all && git reset --hard origin/HEAD"
+        pull_cmd="cd /d \"$win_path\" && git fetch --all --tags && git reset --hard origin/HEAD"
         checkout_cmd="cd /d \"$win_path\" && git checkout \"$version\""
         stash_cmd="cd /d \"$win_path\" && git stash --include-untracked"
         rm_cmd="rmdir /s /q \"$win_path\""
@@ -1063,7 +1063,7 @@ act_ensure_remote_repo_ready() {
         test_dir_cmd="test -d '$remote_path'"
         test_git_cmd="test -d '$remote_path/.git'"
         clone_cmd="git clone '$repo_url' '$remote_path'"
-        pull_cmd="cd '$remote_path' && git fetch --all && git reset --hard origin/HEAD"
+        pull_cmd="cd '$remote_path' && git fetch --all --tags && git reset --hard origin/HEAD"
         checkout_cmd="cd '$remote_path' && git checkout '$version'"
         stash_cmd="cd '$remote_path' && git stash --include-untracked"
         rm_cmd="rm -rf '$remote_path'"
@@ -1103,10 +1103,10 @@ act_ensure_remote_repo_ready() {
                         return 1
                     fi
                 else
-                    _log_warn "Stash failed, trying hard reset..."
-                    # Last resort: hard reset to remote
-                    if ! _act_ssh_exec "$host" "$pull_cmd" 120; then
-                        _log_error "Hard reset failed on $host"
+                    # Last resort: nuke everything and re-clone
+                    _log_warn "Stash failed, re-cloning as last resort..."
+                    if ! _act_ssh_exec "$host" "$rm_cmd && $clone_cmd" 300; then
+                        _log_error "Re-clone failed on $host"
                         return 1
                     fi
                 fi
