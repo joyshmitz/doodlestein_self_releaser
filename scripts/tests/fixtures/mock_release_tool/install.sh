@@ -8,6 +8,9 @@
 # Environment overrides:
 #   MOCK_RELEASE_REPO=owner/repo
 #   MOCK_RELEASE_CACHE_DIR=/tmp/cache
+#   MOCK_RELEASE_USE_TARGET_TRIPLE=1  # use target_triple naming on linux
+#   MOCK_RELEASE_TARGET_TRIPLE_OVERRIDE=<triple>  # force target triple
+#   MOCK_RELEASE_USE_TAR_XZ=1  # use tar.xz for linux
 
 set -uo pipefail
 
@@ -18,6 +21,9 @@ CACHE_DIR="${MOCK_RELEASE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/dsr/install
 VERSION=""
 JSON_MODE=false
 VERBOSE=0
+USE_TARGET_TRIPLE="${MOCK_RELEASE_USE_TARGET_TRIPLE:-0}"
+USE_TAR_XZ="${MOCK_RELEASE_USE_TAR_XZ:-0}"
+TARGET_TRIPLE_OVERRIDE="${MOCK_RELEASE_TARGET_TRIPLE_OVERRIDE:-}"
 
 usage() {
   cat << 'USAGE'
@@ -115,6 +121,8 @@ esac
 ext="tar.gz"
 if [[ "$os" == "windows" ]]; then
   ext="zip"
+elif [[ "$USE_TAR_XZ" == "1" ]]; then
+  ext="tar.xz"
 fi
 
 TARGET="${os}-${arch}"
@@ -122,8 +130,35 @@ EXT="$ext"
 TAR="${TOOL_NAME}-${TARGET}.${EXT}"
 
 version_tag="$VERSION"
-asset_compat="$TAR"
-asset_versioned="${TOOL_NAME}-${version_tag}-${os}-${arch}.${ext}"
+target_triple=""
+if [[ "$os" == "linux" && "$USE_TARGET_TRIPLE" == "1" ]]; then
+  if [[ -n "$TARGET_TRIPLE_OVERRIDE" ]]; then
+    target_triple="$TARGET_TRIPLE_OVERRIDE"
+  else
+    arch_alias="$arch"
+    case "$arch" in
+      amd64) arch_alias="x86_64" ;;
+      arm64) arch_alias="aarch64" ;;
+    esac
+    libc="gnu"
+    if compgen -G "/lib/ld-musl-*.so.1" >/dev/null; then
+      libc="musl"
+    elif command -v ldd &>/dev/null; then
+      if ldd --version 2>&1 | grep -qi musl; then
+        libc="musl"
+      fi
+    fi
+    target_triple="${arch_alias}-unknown-linux-${libc}"
+  fi
+fi
+
+if [[ -n "$target_triple" ]]; then
+  asset_compat="${TOOL_NAME}-${target_triple}.${ext}"
+  asset_versioned="${TOOL_NAME}-${version_tag}-${target_triple}.${ext}"
+else
+  asset_compat="$TAR"
+  asset_versioned="${TOOL_NAME}-${version_tag}-${os}-${arch}.${ext}"
+fi
 
 mkdir -p "$INSTALL_DIR" "$CACHE_DIR"
 
@@ -158,6 +193,8 @@ fi
 tmp_dir="$(mktemp -d)"
 if [[ "$ext" == "tar.gz" ]]; then
   tar -xzf "$archive_path" -C "$tmp_dir"
+elif [[ "$ext" == "tar.xz" ]]; then
+  tar -xJf "$archive_path" -C "$tmp_dir"
 else
   if ! command -v unzip &>/dev/null; then
     fail "unzip required for zip archives"

@@ -17,11 +17,28 @@ jobs:
         run: |
           mkdir -p dist
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${GITHUB_REF_NAME}" -o dist/mock_release_tool ./cmd/mock_release_tool
-          tar -C dist -czf dist/mock_release_tool-${GITHUB_REF_NAME}-linux-amd64.tar.gz mock_release_tool
+          ext="tar.gz"
+          if [[ "${MOCK_RELEASE_USE_TAR_XZ:-}" == "1" ]]; then
+            ext="tar.xz"
+          fi
+          if [[ "${MOCK_RELEASE_TARGET_TRIPLE_MODE:-}" == "1" ]]; then
+            for triple in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do
+              if [[ "$ext" == "tar.xz" ]]; then
+                tar -C dist -cJf "dist/mock_release_tool-${GITHUB_REF_NAME}-${triple}.${ext}" mock_release_tool
+              else
+                tar -C dist -czf "dist/mock_release_tool-${GITHUB_REF_NAME}-${triple}.${ext}" mock_release_tool
+              fi
+            done
+          fi
+          if [[ "$ext" == "tar.xz" ]]; then
+            tar -C dist -cJf "dist/mock_release_tool-${GITHUB_REF_NAME}-linux-amd64.${ext}" mock_release_tool
+          else
+            tar -C dist -czf "dist/mock_release_tool-${GITHUB_REF_NAME}-linux-amd64.${ext}" mock_release_tool
+          fi
       - uses: actions/upload-artifact@v4
         with:
-          name: mock_release_tool-${{ github.ref_name }}-linux-amd64.tar.gz
-          path: dist/mock_release_tool-${{ github.ref_name }}-linux-amd64.tar.gz
+          name: mock_release_tool-${{ github.ref_name }}-linux
+          path: dist/mock_release_tool-${{ github.ref_name }}-linux-*
 
   build-darwin:
     runs-on: ubuntu-latest
