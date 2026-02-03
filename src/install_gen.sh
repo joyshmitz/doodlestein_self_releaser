@@ -253,6 +253,85 @@ _cache_put() {
 }
 
 # ============================================================================
+# ARTIFACT NAMING
+# ============================================================================
+
+_has_known_ext() {
+    local name="$1"
+    case "$name" in
+        *.tar.gz|*.tgz|*.tar.xz|*.zip|*.exe) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_resolve_arch_alias() {
+    local arch="$1"
+
+    case "$arch" in
+__ARCH_ALIAS_CASES__
+    esac
+
+    echo "$arch"
+}
+
+_resolve_target_triple() {
+    local os="$1"
+    local arch="$2"
+
+    case "${os}/${arch}" in
+__TARGET_TRIPLE_CASES__
+    esac
+
+    case "${os}/${arch}" in
+        linux/amd64) echo "x86_64-unknown-linux-gnu" ;;
+        linux/arm64) echo "aarch64-unknown-linux-gnu" ;;
+        darwin/amd64) echo "x86_64-apple-darwin" ;;
+        darwin/arm64) echo "aarch64-apple-darwin" ;;
+        windows/amd64) echo "x86_64-pc-windows-msvc" ;;
+        *) echo "${os}-${arch}" ;;
+    esac
+}
+
+_apply_artifact_pattern() {
+    local pattern="$1"
+    local os="$2"
+    local arch="$3"
+    local version_num="$4"
+    local format="$5"
+
+    local name="$pattern"
+    local arch_alias
+    arch_alias=$(_resolve_arch_alias "$arch")
+    local target="${os}-${arch_alias}"
+    local target_triple
+    target_triple=$(_resolve_target_triple "$os" "$arch")
+
+    name="${name//\$\{name\}/$TOOL_NAME}"
+    name="${name//\$\{binary\}/$BINARY_NAME}"
+    name="${name//\$\{version\}/$version_num}"
+    name="${name//\$\{os\}/$os}"
+    name="${name//\$\{arch\}/$arch_alias}"
+    name="${name//\$\{target\}/$target}"
+    name="${name//\$\{TARGET\}/$target}"
+    name="${name//\$\{target_triple\}/$target_triple}"
+    name="${name//\$\{TARGET_TRIPLE\}/$target_triple}"
+
+    if [[ "$pattern" == *'${ext}'* || "$pattern" == *'${EXT}'* ]]; then
+        name="${name//\$\{ext\}/$format}"
+        name="${name//\$\{EXT\}/$format}"
+        echo "$name"
+        return 0
+    fi
+
+    if _has_known_ext "$name"; then
+        echo "$name"
+        return 0
+    fi
+
+    echo "${name}.${format}"
+}
+
+# ============================================================================
 # GH CLI DOWNLOAD
 # ============================================================================
 
@@ -278,20 +357,8 @@ _gh_download() {
     local version_num="${version#v}"
 
     # Construct asset name from pattern
-    local artifact_name="$ARTIFACT_NAMING"
-    artifact_name="${artifact_name//\$\{name\}/$TOOL_NAME}"
-    artifact_name="${artifact_name//\$\{binary\}/$BINARY_NAME}"
-    artifact_name="${artifact_name//\$\{version\}/$version_num}"
-    artifact_name="${artifact_name//\$\{os\}/$os}"
-    artifact_name="${artifact_name//\$\{arch\}/$arch}"
-    # Only append extension if pattern doesn't include ${ext}
     local asset_name
-    if [[ "$ARTIFACT_NAMING" == *'${ext}'* ]]; then
-        artifact_name="${artifact_name//\$\{ext\}/$format}"
-        asset_name="$artifact_name"
-    else
-        asset_name="${artifact_name}.${format}"
-    fi
+    asset_name=$(_apply_artifact_pattern "$ARTIFACT_NAMING" "$os" "$arch" "$version_num" "$format")
 
     _log_info "Downloading via gh release download: $asset_name"
 
@@ -347,20 +414,8 @@ _get_download_url() {
     local version_num="${version#v}"
 
     # Apply artifact naming pattern
-    local artifact_name="$ARTIFACT_NAMING"
-    artifact_name="${artifact_name//\$\{name\}/$TOOL_NAME}"
-    artifact_name="${artifact_name//\$\{binary\}/$BINARY_NAME}"
-    artifact_name="${artifact_name//\$\{version\}/$version_num}"
-    artifact_name="${artifact_name//\$\{os\}/$os}"
-    artifact_name="${artifact_name//\$\{arch\}/$arch}"
-    # Only append extension if pattern doesn't include ${ext}
     local final_name
-    if [[ "$ARTIFACT_NAMING" == *'${ext}'* ]]; then
-        artifact_name="${artifact_name//\$\{ext\}/$format}"
-        final_name="$artifact_name"
-    else
-        final_name="${artifact_name}.${format}"
-    fi
+    final_name=$(_apply_artifact_pattern "$ARTIFACT_NAMING" "$os" "$arch" "$version_num" "$format")
 
     echo "https://github.com/$REPO/releases/download/$version/${final_name}"
 }
@@ -483,6 +538,9 @@ _extract_archive() {
     case "$archive" in
         *.tar.gz|*.tgz)
             tar -xzf "$archive" -C "$dest_dir"
+            ;;
+        *.tar.xz)
+            tar -xJf "$archive" -C "$dest_dir"
             ;;
         *.tar)
             tar -xf "$archive" -C "$dest_dir"
@@ -926,7 +984,7 @@ install_gen_create() {
     log_info "Loading config from: $config_file"
 
     # Extract values
-    local repo binary_name language
+    local repo binary_name language workflow_path local_path
     local archive_linux archive_darwin archive_windows
     local artifact_naming
 
@@ -934,6 +992,8 @@ install_gen_create() {
     repo=$(_install_gen_yaml_get "$config_file" "repo" "")
     binary_name=$(_install_gen_yaml_get "$config_file" "binary_name" "$tool_name")
     language=$(_install_gen_yaml_get "$config_file" "language" "go")
+    workflow_path=$(_install_gen_yaml_get "$config_file" "workflow" ".github/workflows/release.yml")
+    local_path=$(_install_gen_yaml_get "$config_file" "local_path" "")
 
     # Archive formats (with yq for nested keys)
     if command -v yq &>/dev/null; then
@@ -946,10 +1006,67 @@ install_gen_create() {
         archive_windows="zip"
     fi
 
-    artifact_naming=$(_install_gen_yaml_get "$config_file" "artifact_naming" '${name}-${version}-${os}-${arch}')
+    artifact_naming=$(_install_gen_yaml_get "$config_file" "artifact_naming" "")
     # Strip surrounding quotes if present
     artifact_naming="${artifact_naming#\"}"
     artifact_naming="${artifact_naming%\"}"
+
+    # If no explicit artifact_naming, try to derive from workflow
+    if [[ -z "$artifact_naming" && -n "$local_path" && -n "$workflow_path" ]]; then
+        if ! declare -F artifact_naming_parse_workflow &>/dev/null; then
+            if [[ -f "$_IG_SCRIPT_DIR/artifact_naming.sh" ]]; then
+                # shellcheck source=/dev/null
+                source "$_IG_SCRIPT_DIR/artifact_naming.sh" 2>/dev/null || true
+            fi
+        fi
+
+        local workflow_file="$local_path/$workflow_path"
+        if [[ -f "$workflow_file" ]] && declare -F artifact_naming_parse_workflow &>/dev/null; then
+            local patterns_json
+            patterns_json=$(artifact_naming_parse_workflow "$workflow_file" 2>/dev/null || echo "[]")
+            if declare -F _an_choose_workflow_pattern &>/dev/null; then
+                artifact_naming=$(_an_choose_workflow_pattern "$patterns_json")
+            fi
+        fi
+    fi
+
+    # Fallback: GoReleaser config if workflow doesn't yield a pattern
+    if [[ -z "$artifact_naming" && -n "$local_path" && -f "$_IG_SCRIPT_DIR/artifact_naming.sh" ]]; then
+        if ! declare -F artifact_naming_parse_goreleaser &>/dev/null; then
+            # shellcheck source=/dev/null
+            source "$_IG_SCRIPT_DIR/artifact_naming.sh" 2>/dev/null || true
+        fi
+
+        local goreleaser_file=""
+        for candidate in ".goreleaser.yml" ".goreleaser.yaml" "goreleaser.yml" "goreleaser.yaml"; do
+            if [[ -f "$local_path/$candidate" ]]; then
+                goreleaser_file="$local_path/$candidate"
+                break
+            fi
+        done
+        if [[ -n "$goreleaser_file" ]] && declare -F artifact_naming_parse_goreleaser &>/dev/null; then
+            artifact_naming=$(artifact_naming_parse_goreleaser "$goreleaser_file" 2>/dev/null || echo "")
+        fi
+    fi
+
+    if [[ -z "$artifact_naming" ]]; then
+        artifact_naming='${name}-${version}-${os}-${arch}'
+    fi
+
+    # Target triple + arch alias overrides (optional)
+    local target_triple_cases=""
+    local arch_alias_cases=""
+    if command -v yq &>/dev/null; then
+        while IFS=$'\t' read -r platform triple; do
+            [[ -z "$platform" || -z "$triple" || "$platform" == "null" || "$triple" == "null" ]] && continue
+            target_triple_cases+=$'        '"$platform"$') echo "'"$triple"'" ;;'$'\n'
+        done < <(yq -r '.target_triples // {} | to_entries[] | [.key, .value] | @tsv' "$config_file" 2>/dev/null)
+
+        while IFS=$'\t' read -r arch alias; do
+            [[ -z "$arch" || -z "$alias" || "$arch" == "null" || "$alias" == "null" ]] && continue
+            arch_alias_cases+=$'        '"$arch"$') echo "'"$alias"'" ;;'$'\n'
+        done < <(yq -r '.arch_aliases // {} | to_entries[] | [.key, .value] | @tsv' "$config_file" 2>/dev/null)
+    fi
 
     # Get minisign public key (from tool config or global dsr config)
     local minisign_pubkey=""
@@ -968,8 +1085,6 @@ install_gen_create() {
         "./SKILL.md"
         "./config/skills/${tool_name}/SKILL.md"
     )
-    local local_path
-    local_path=$(_install_gen_yaml_get "$config_file" "local_path" "")
     if [[ -n "$local_path" && -f "$local_path/SKILL.md" ]]; then
         skill_paths=("$local_path/SKILL.md" "${skill_paths[@]}")
     fi
@@ -1020,6 +1135,8 @@ install_gen_create() {
     template="${template//__ARCHIVE_FORMAT_WINDOWS__/$archive_windows}"
     template="${template//__ARTIFACT_NAMING__/$artifact_naming}"
     template="${template//__MINISIGN_PUBKEY__/$minisign_pubkey}"
+    template="${template//__TARGET_TRIPLE_CASES__/$target_triple_cases}"
+    template="${template//__ARCH_ALIAS_CASES__/$arch_alias_cases}"
 
     # Handle skill content - use base64 encoding to avoid escaping issues
     if [[ -n "$skill_content" ]]; then

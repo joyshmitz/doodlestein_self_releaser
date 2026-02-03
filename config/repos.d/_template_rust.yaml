@@ -58,7 +58,7 @@ checks:
   - cargo clippy -- -D warnings
 
 # Artifact naming pattern
-# Variables: ${name}, ${version}, ${os}, ${arch}, ${ext}
+# Variables: ${name}, ${version}, ${os}, ${arch}, ${target}, ${target_triple}, ${ext}
 artifact_naming: "${name}-${version}-${os}-${arch}"
 
 # Install.sh compatibility (optional)
@@ -72,6 +72,15 @@ artifact_naming: "${name}-${version}-${os}-${arch}"
 # install_script_path: install.sh
 #
 # Precedence: install_script_compat > install_script_path > fallback (strip version)
+
+# Optional: arch aliases for install script compatibility
+# arch_aliases:
+#   amd64: x86_64
+#   arm64: aarch64
+
+# Optional: target triple overrides (for workflows using matrix.target)
+# target_triples:
+#   linux/amd64: x86_64-unknown-linux-gnu
 
 # Archive format per platform
 archive_format:

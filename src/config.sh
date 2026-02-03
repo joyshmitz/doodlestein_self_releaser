@@ -519,6 +519,68 @@ config_get_artifact_naming() {
     config_get_tool_field "$toolname" "artifact_naming" ""
 }
 
+# Get target triple override for a tool/platform
+# Usage: config_get_target_triple <toolname> <platform>
+# Returns: Target triple (e.g., "x86_64-unknown-linux-gnu") or empty
+config_get_target_triple() {
+    local toolname="$1"
+    local platform="$2"
+
+    local config_dir="${DSR_CONFIG_DIR:-$HOME/.config/dsr}"
+    local tool_config="$config_dir/repos.d/${toolname}.yaml"
+
+    if [[ -f "$tool_config" ]] && command -v yq &>/dev/null; then
+        local value
+        value=$(yq -r ".target_triples.\"$platform\" // \"\"" "$tool_config" 2>/dev/null)
+        if [[ -n "$value" && "$value" != "null" ]]; then
+            echo "$value"
+            return 0
+        fi
+    fi
+
+    if [[ -f "$DSR_REPOS_FILE" ]] && command -v yq &>/dev/null; then
+        local value
+        value=$(yq -r ".tools.$toolname.target_triples.\"$platform\" // \"\"" "$DSR_REPOS_FILE" 2>/dev/null)
+        if [[ -n "$value" && "$value" != "null" ]]; then
+            echo "$value"
+            return 0
+        fi
+    fi
+
+    echo ""
+}
+
+# Get arch alias override for a tool/arch
+# Usage: config_get_arch_alias <toolname> <arch>
+# Returns: Alias (e.g., "x86_64") or empty
+config_get_arch_alias() {
+    local toolname="$1"
+    local arch="$2"
+
+    local config_dir="${DSR_CONFIG_DIR:-$HOME/.config/dsr}"
+    local tool_config="$config_dir/repos.d/${toolname}.yaml"
+
+    if [[ -f "$tool_config" ]] && command -v yq &>/dev/null; then
+        local value
+        value=$(yq -r ".arch_aliases.\"$arch\" // \"\"" "$tool_config" 2>/dev/null)
+        if [[ -n "$value" && "$value" != "null" ]]; then
+            echo "$value"
+            return 0
+        fi
+    fi
+
+    if [[ -f "$DSR_REPOS_FILE" ]] && command -v yq &>/dev/null; then
+        local value
+        value=$(yq -r ".tools.$toolname.arch_aliases.\"$arch\" // \"\"" "$DSR_REPOS_FILE" 2>/dev/null)
+        if [[ -n "$value" && "$value" != "null" ]]; then
+            echo "$value"
+            return 0
+        fi
+    fi
+
+    echo ""
+}
+
 # List configured hosts
 # Usage: config_list_hosts [--json]
 config_list_hosts() {
@@ -594,4 +656,4 @@ export -f config_init config_load config_get config_set config_validate config_s
 export -f config_get_host config_get_tool config_list_hosts config_list_tools
 export -f config_get_host_for_platform
 export -f config_get_tool_field config_get_install_script_compat config_get_install_script_path
-export -f config_get_artifact_naming
+export -f config_get_artifact_naming config_get_target_triple config_get_arch_alias

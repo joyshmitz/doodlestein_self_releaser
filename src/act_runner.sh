@@ -59,6 +59,7 @@ _act_archive_format() {
     local name="$1"
     case "$name" in
         *.tar.gz|*.tgz) echo "tar.gz" ;;
+        *.tar.xz) echo "tar.xz" ;;
         *.zip) echo "zip" ;;
         *) echo "none" ;;
     esac
@@ -1508,7 +1509,25 @@ act_run_native_build() {
                 version_stripped="unknown"
             fi
 
-            local archive_name="${tool_name}-${version_stripped}-${plat_name}.${archive_ext}"
+            local archive_name=""
+            if ! declare -F artifact_naming_generate_dual_for_tool &>/dev/null; then
+                local script_dir
+                script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+                # shellcheck source=./artifact_naming.sh
+                source "$script_dir/artifact_naming.sh" 2>/dev/null || true
+            fi
+
+            if declare -F artifact_naming_generate_dual_for_tool &>/dev/null; then
+                local os arch names_json
+                os="${platform%/*}"
+                arch="${platform#*/}"
+                names_json=$(artifact_naming_generate_dual_for_tool "$tool_name" "$version" "$os" "$arch" "$archive_ext" "$local_path" 2>/dev/null || echo "")
+                archive_name=$(echo "$names_json" | jq -r '.versioned // empty' 2>/dev/null)
+            fi
+
+            if [[ -z "$archive_name" ]]; then
+                archive_name="${tool_name}-${version_stripped}-${plat_name}.${archive_ext}"
+            fi
             local archive_path="$artifact_dir/$archive_name"
 
             # Get just the filenames for archive creation

@@ -35,6 +35,49 @@ _an_log_ok()    { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${_AN_GREEN}[artifact_n
 _an_log_warn()  { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${_AN_YELLOW}[artifact_naming]${_AN_NC} $*" >&2; }
 _an_log_error() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${_AN_RED}[artifact_naming]${_AN_NC} $*" >&2; }
 
+# Known archive extensions
+_an_has_known_ext() {
+    local name="$1"
+    case "$name" in
+        *.tar.gz|*.tgz|*.tar.xz|*.zip|*.exe) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Append extension if missing (and ext is not empty)
+_an_append_ext_if_missing() {
+    local name="$1"
+    local ext="$2"
+
+    if [[ -z "$ext" || "$ext" == "none" ]]; then
+        # Avoid trailing dot if ext is empty
+        echo "${name%.}"
+        return 0
+    fi
+
+    if _an_has_known_ext "$name"; then
+        echo "$name"
+        return 0
+    fi
+
+    echo "${name}.${ext}"
+}
+
+# Default target triple mapping (override via config target_triples)
+_an_default_target_triple() {
+    local os="$1"
+    local arch="$2"
+
+    case "$os/$arch" in
+        linux/amd64) echo "x86_64-unknown-linux-gnu" ;;
+        linux/arm64) echo "aarch64-unknown-linux-gnu" ;;
+        darwin/amd64) echo "x86_64-apple-darwin" ;;
+        darwin/arm64) echo "aarch64-apple-darwin" ;;
+        windows/amd64) echo "x86_64-pc-windows-msvc" ;;
+        *) echo "${os}-${arch}" ;;
+    esac
+}
+
 # Normalize variable names to canonical form
 # Input: Pattern with various variable syntaxes
 # Output: Pattern with normalized ${name}, ${version}, ${os}, ${arch} variables
@@ -51,8 +94,10 @@ _an_normalize_pattern() {
     _an_log_debug "Normalizing pattern: $pattern"
 
     # Use sed for all substitutions to avoid bash interpreting ${var} in replacements
-    # Normalize TARGET -> os-arch combined (must come before OS/ARCH to avoid double replacement)
-    result=$(printf '%s' "$result" | sed 's/\${TARGET}/${os}-${arch}/g; s/\$TARGET/${os}-${arch}/g')
+    # Normalize TARGET/PLATFORM -> combined forms (must come before OS/ARCH to avoid double replacement)
+    result=$(printf '%s' "$result" | sed 's/\${TARGET}/${target}/g; s/\$TARGET/${target}/g')
+    result=$(printf '%s' "$result" | sed 's/\${TARGET_TRIPLE}/${target_triple}/g; s/\$TARGET_TRIPLE/${target_triple}/g')
+    result=$(printf '%s' "$result" | sed 's/\${platform}/${os}_${arch}/g; s/\${PLATFORM}/${os}_${arch}/g; s/\$platform/${os}_${arch}/g; s/\$PLATFORM/${os}_${arch}/g')
 
     # Normalize OS/GOOS variants
     result=$(printf '%s' "$result" | sed 's/\${OS}/${os}/g; s/\${GOOS}/${os}/g; s/\$OS/${os}/g; s/\$GOOS/${os}/g')
@@ -67,19 +112,19 @@ _an_normalize_pattern() {
     # Normalize VERSION
     result=$(printf '%s' "$result" | sed 's/\${VERSION}/${version}/g; s/\$VERSION/${version}/g')
 
-    # Normalize EXT (common extensions)
+    # Normalize EXT variable to ${ext} (preserve extension semantics)
     # Handle .${EXT} pattern (with leading dot) to avoid double dots
-    result=$(printf '%s' "$result" | sed 's/\.\${EXT}/.tar.gz/g; s/\.\$EXT/.tar.gz/g')
+    result=$(printf '%s' "$result" | sed 's/\.\${EXT}/.${ext}/g; s/\.\$EXT/.${ext}/g')
     # Handle ${EXT} without leading dot
-    result=$(printf '%s' "$result" | sed 's/\${EXT}/.tar.gz/g; s/\$EXT/.tar.gz/g')
+    result=$(printf '%s' "$result" | sed 's/\${EXT}/${ext}/g; s/\$EXT/${ext}/g')
 
     # Handle GitHub Actions matrix syntax
     # ${{ matrix.goos }} -> ${os}
     result=$(printf '%s' "$result" | sed -E 's/\$\{\{\s*matrix\.(goos|os)\s*\}\}/${os}/g')
     # ${{ matrix.goarch }} -> ${arch}
     result=$(printf '%s' "$result" | sed -E 's/\$\{\{\s*matrix\.(goarch|arch)\s*\}\}/${arch}/g')
-    # ${{ matrix.target }} -> ${os}-${arch}
-    result=$(printf '%s' "$result" | sed -E 's/\$\{\{\s*matrix\.target\s*\}\}/${os}-${arch}/g')
+    # ${{ matrix.target }} -> ${target_triple}
+    result=$(printf '%s' "$result" | sed -E 's/\$\{\{\s*matrix\.target\s*\}\}/${target_triple}/g')
     # Strip version from pattern for compat comparison
     result=$(printf '%s' "$result" | sed -E 's/\$\{\{\s*(github\.ref_name|env\.VERSION)\s*\}\}/${version}/g')
 
@@ -88,11 +133,12 @@ _an_normalize_pattern() {
 }
 
 # Parse install.sh and extract expected artifact naming pattern
-# Args: install_path
+# Args: install_path [tool_name]
 # Output: Normalized pattern string (stdout) or empty on failure
 # Exit: 0 on success, 1 on not found/error
 artifact_naming_parse_install_script() {
     local install_path="$1"
+    local tool_name="${2:-}"
 
     if [[ ! -f "$install_path" ]]; then
         _an_log_debug "Install script not found: $install_path"
@@ -104,71 +150,105 @@ artifact_naming_parse_install_script() {
 
     local content
     content=$(cat "$install_path")
-    local pattern=""
+    local -a candidates=()
 
     # Pattern 1: TAR variable assignment
     # TAR="cass-${TARGET}.${EXT}"
     # TAR="${name}-${TARGET}.tar.gz"
     # Avoid non-portable grep -P (not available on macOS/BSD)
-    if [[ -z "$pattern" ]]; then
-        pattern=$(echo "$content" | sed -n 's/.*TAR="\([^"]*\$[^"]*\)".*/\1/p' | head -1 || true)
-        if [[ -n "$pattern" ]]; then
-            _an_log_debug "Found TAR pattern: $pattern"
-        fi
-    fi
+    while IFS= read -r pattern; do
+        [[ -z "$pattern" ]] && continue
+        candidates+=("$pattern")
+        _an_log_debug "Found TAR pattern: $pattern"
+    done < <(echo "$content" | sed -n 's/.*TAR="\([^"]*\$[^"]*\)".*/\1/p' || true)
 
     # Pattern 2: asset_name variable
     # asset_name="rch-${TARGET}.tar.gz"
     # Avoid non-portable grep -P (not available on macOS/BSD)
-    if [[ -z "$pattern" ]]; then
-        pattern=$(echo "$content" | sed -n 's/.*[Aa][Ss][Ss][Ee][Tt]_[Nn][Aa][Mm][Ee]="\([^"]*\$[^"]*\)".*/\1/p' | head -1 || true)
-        if [[ -n "$pattern" ]]; then
-            _an_log_debug "Found asset_name pattern: $pattern"
-        fi
-    fi
+    while IFS= read -r pattern; do
+        [[ -z "$pattern" ]] && continue
+        candidates+=("$pattern")
+        _an_log_debug "Found asset_name pattern: $pattern"
+    done < <(echo "$content" | sed -n 's/.*[Aa][Ss][Ss][Ee][Tt]_[Nn][Aa][Mm][Ee]="\([^"]*\$[^"]*\)".*/\1/p' || true)
+
+    # Pattern 2b: archive_name variable
+    # archive_name="tool-${VERSION}-${platform}.tar.gz"
+    while IFS= read -r pattern; do
+        [[ -z "$pattern" ]] && continue
+        candidates+=("$pattern")
+        _an_log_debug "Found archive_name pattern: $pattern"
+    done < <(echo "$content" | sed -n 's/.*[Aa][Rr][Cc][Hh][Ii][Vv][Ee]_[Nn][Aa][Mm][Ee]="\([^"]*\$[^"]*\)".*/\1/p' || true)
 
     # Pattern 3: Download URL with filename
     # URL="https://...releases/download/${VERSION}/${name}-${TARGET}.tar.gz"
     # Avoid non-portable grep -P (not available on macOS/BSD)
-    if [[ -z "$pattern" ]]; then
-        local url_match
-        url_match=$(echo "$content" | sed -n 's/.*\(https:\/\/[^"]*releases\/download\/[^"]*\).*/\1/p' | head -1 || true)
-        if [[ -n "$url_match" ]]; then
-            # Extract filename portion after last /
-            pattern="${url_match##*/}"
-            _an_log_debug "Extracted from URL: $pattern"
-        fi
-    fi
+    while IFS= read -r url_match; do
+        [[ -z "$url_match" ]] && continue
+        local pattern="${url_match##*/}"
+        candidates+=("$pattern")
+        _an_log_debug "Extracted from URL: $pattern"
+    done < <(echo "$content" | sed -n 's/.*\(https:\/\/[^"]*releases\/download\/[^"]*\).*/\1/p' || true)
 
     # Pattern 4: Direct curl/wget with asset pattern
     # curl ... "https://.../${name}-${os}-${arch}.tar.gz"
     # Avoid non-portable grep -P (not available on macOS/BSD)
-    if [[ -z "$pattern" ]]; then
-        local curl_match
-        curl_match=$(echo "$content" | sed -n 's/.*\(curl[^|]*\$[^"]*\.tar\.gz\).*/\1/p' | head -1 || true)
-        if [[ -n "$curl_match" ]]; then
-            pattern="${curl_match##*/}"
-            _an_log_debug "Extracted from curl: $pattern"
-        fi
-    fi
+    while IFS= read -r curl_match; do
+        [[ -z "$curl_match" ]] && continue
+        local pattern="${curl_match##*/}"
+        candidates+=("$pattern")
+        _an_log_debug "Extracted from curl: $pattern"
+    done < <(echo "$content" | sed -n 's/.*\(curl[^|]*\$[^"]*\.tar\.gz\).*/\1/p' || true)
 
-    if [[ -z "$pattern" ]]; then
+    if [[ ${#candidates[@]} -eq 0 ]]; then
         _an_log_debug "No pattern found in install script"
         echo ""
         return 1
     fi
 
-    # Normalize and output
-    local normalized
-    normalized=$(_an_normalize_pattern "$pattern")
+    # Normalize candidates
+    local -a normalized_candidates=()
+    local cand
+    for cand in "${candidates[@]}"; do
+        local normalized
+        normalized=$(_an_normalize_pattern "$cand")
 
-    # Remove extension for pattern comparison
-    normalized="${normalized%.tar.gz}"
-    normalized="${normalized%.zip}"
-    normalized="${normalized%.tgz}"
+        # Remove extension for pattern comparison
+        normalized="${normalized%.tar.gz}"
+        normalized="${normalized%.tar.xz}"
+        normalized="${normalized%.zip}"
+        normalized="${normalized%.tgz}"
+        # Remove variable extension placeholder if present
+        case "$normalized" in
+            *'.${ext}') normalized="${normalized%'.${ext}'}" ;;
+            *'.${EXT}') normalized="${normalized%'.${EXT}'}" ;;
+        esac
 
-    _an_log_info "Extracted pattern from install.sh: $normalized"
-    echo "$normalized"
+        normalized_candidates+=("$normalized")
+    done
+
+    local best=""
+    if [[ -n "$tool_name" ]]; then
+        local best_score=-1
+        for cand in "${normalized_candidates[@]}"; do
+            local score=0
+            [[ "$cand" == *'${name}'* ]] && score=$((score + 5))
+            [[ "$cand" == *'${version}'* ]] && score=$((score + 2))
+            [[ "$cand" == *'${os}'* ]] && score=$((score + 1))
+            [[ "$cand" == *'${arch}'* ]] && score=$((score + 1))
+            [[ "$cand" == *"${tool_name}"* ]] && score=$((score + 4))
+            if [[ "$score" -gt "$best_score" ]]; then
+                best="$cand"
+                best_score="$score"
+            fi
+        done
+    fi
+
+    if [[ -z "$best" ]]; then
+        best="${normalized_candidates[0]}"
+    fi
+
+    _an_log_info "Extracted pattern from install.sh: $best"
+    echo "$best"
     return 0
 }
 
@@ -230,6 +310,7 @@ artifact_naming_parse_workflow() {
                     # Extract just the filename pattern
                     normalized="${normalized##*/}"
                     normalized="${normalized%.tar.gz}"
+                    normalized="${normalized%.tar.xz}"
                     normalized="${normalized%.zip}"
                     patterns+=("$normalized")
                     _an_log_debug "Found gh-release file: $normalized"
@@ -243,11 +324,12 @@ artifact_naming_parse_workflow() {
     run_steps=$(yq -r '.jobs[].steps[] | select(has("run")) | .run' "$workflow_path" 2>/dev/null || true)
 
     while IFS= read -r line; do
-        if [[ "$line" =~ gh\ release\ upload.*([a-zA-Z0-9_-]+(\$\{\{[^}]+\}\}|[.-])+\.(tar\.gz|zip)) ]]; then
+        if [[ "$line" =~ gh\ release\ upload.*([a-zA-Z0-9_-]+(\$\{\{[^}]+\}\}|[.-])+\.(tar\.gz|tar\.xz|zip)) ]]; then
             local match="${BASH_REMATCH[1]}"
             local normalized
             normalized=$(_an_normalize_pattern "$match")
             normalized="${normalized%.tar.gz}"
+            normalized="${normalized%.tar.xz}"
             normalized="${normalized%.zip}"
             patterns+=("$normalized")
             _an_log_debug "Found gh release upload: $normalized"
@@ -283,6 +365,69 @@ artifact_naming_parse_workflow() {
     return 0
 }
 
+# Parse GoReleaser config and extract archive name_template
+# Args: goreleaser_path
+# Output: Normalized pattern (stdout) or empty on failure
+artifact_naming_parse_goreleaser() {
+    local goreleaser_path="$1"
+
+    if [[ ! -f "$goreleaser_path" ]]; then
+        _an_log_debug "GoReleaser config not found: $goreleaser_path"
+        echo ""
+        return 1
+    fi
+
+    if ! command -v yq &>/dev/null; then
+        _an_log_warn "yq not installed, skipping goreleaser parsing"
+        echo ""
+        return 1
+    fi
+
+    local template
+    template=$(yq -r '
+        .archives[]? |
+        select((.formats // []) | index("binary") | not) |
+        .name_template // empty
+    ' "$goreleaser_path" 2>/dev/null | head -1)
+
+    if [[ -z "$template" || "$template" == "null" ]]; then
+        template=$(yq -r '.archives[]?.name_template // empty' "$goreleaser_path" 2>/dev/null | head -1)
+    fi
+
+    if [[ -z "$template" || "$template" == "null" ]]; then
+        _an_log_debug "No name_template found in goreleaser config"
+        echo ""
+        return 1
+    fi
+
+    # Collapse whitespace/newlines
+    local normalized
+    normalized=$(printf '%s' "$template" | tr -d '\r' | tr '\n' ' ' | sed -E 's/[[:space:]]+//g')
+
+    # Replace GoReleaser template variables with dsr placeholders
+    normalized=$(printf '%s' "$normalized" | sed -E 's/\{\{[- ]*\.ProjectName[- ]*\}\}/\${name}/g')
+    normalized=$(printf '%s' "$normalized" | sed -E 's/\{\{[- ]*\.Version[- ]*\}\}/\${version}/g')
+    normalized=$(printf '%s' "$normalized" | sed -E 's/\{\{[- ]*\.Os[- ]*\}\}/\${os}/g')
+    normalized=$(printf '%s' "$normalized" | sed -E 's/\{\{[- ]*\.Arch[- ]*\}\}/\${arch}/g')
+    normalized=$(printf '%s' "$normalized" | sed -E 's/\{\{[- ]*\.Tag[- ]*\}\}/v\${version}/g')
+    # Drop arm suffix blocks (dsr does not model arm variants yet)
+    normalized=$(printf '%s' "$normalized" | sed -E 's/\{\{[- ]*if\.Arm[- ]*\}\}v\{\{[- ]*\.Arm[- ]*\}\}\{\{[- ]*end[- ]*\}\}//g')
+    # Remove any remaining template fragments
+    normalized=$(printf '%s' "$normalized" | sed -E 's/\{\{[^}]*\}\}//g')
+
+    normalized=$(_an_normalize_pattern "$normalized")
+
+    # Strip archive extensions (GoReleaser adds these based on format)
+    normalized="${normalized%.tar.gz}"
+    normalized="${normalized%.tar.xz}"
+    normalized="${normalized%.zip}"
+    normalized="${normalized%.tgz}"
+
+    _an_log_info "Extracted pattern from goreleaser: $normalized"
+    echo "$normalized"
+    return 0
+}
+
 # Generate both versioned and install.sh-compatible names
 # Args: tool_name version os arch ext [compat_pattern]
 # Output: JSON object with both names (stdout)
@@ -294,21 +439,31 @@ artifact_naming_generate_dual() {
     local arch="$4"
     local ext="${5:-tar.gz}"
     local compat_pattern="${6:-}"  # Optional explicit compat pattern
+    local versioned_pattern="${7:-}"  # Optional explicit versioned pattern
 
     _an_log_debug "Generating dual names: tool=$tool version=$version os=$os arch=$arch ext=$ext"
-
-    # Strip leading 'v' from version for filename
-    local version_stripped="${version#v}"
 
     local ext_value="$ext"
     [[ "$ext_value" == "none" ]] && ext_value=""
 
-    # Generate versioned name (default pattern)
-    local versioned
-    if [[ -n "$ext_value" ]]; then
-        versioned="${tool}-${version_stripped}-${os}-${arch}.${ext_value}"
+    # Generate versioned name (config/workflow pattern or default)
+    local versioned=""
+    if [[ -n "$versioned_pattern" ]]; then
+        local rendered
+        rendered=$(artifact_naming_substitute "$versioned_pattern" "$tool" "$version" "$os" "$arch" "$ext_value")
+        # If pattern did not include ${ext}, append extension if missing
+        if [[ "$versioned_pattern" == *'${ext}'* || "$versioned_pattern" == *'${EXT}'* ]]; then
+            versioned="$rendered"
+        else
+            versioned=$(_an_append_ext_if_missing "$rendered" "$ext_value")
+        fi
     else
-        versioned="${tool}-${version_stripped}-${os}-${arch}"
+        local version_stripped="${version#v}"
+        if [[ -n "$ext_value" ]]; then
+            versioned="${tool}-${version_stripped}-${os}-${arch}.${ext_value}"
+        else
+            versioned="${tool}-${version_stripped}-${os}-${arch}"
+        fi
     fi
 
     # Generate compat name
@@ -316,14 +471,10 @@ artifact_naming_generate_dual() {
     if [[ -n "$compat_pattern" ]]; then
         # Use explicit pattern if provided
         compat=$(artifact_naming_substitute "$compat_pattern" "$tool" "$version" "$os" "$arch" "$ext_value")
-        if [[ -n "$ext_value" ]]; then
-            if [[ "$compat" == *".${ext_value}" ]]; then
-                : # Extension already present
-            elif [[ "$compat" =~ \.(tar\.gz|tgz|zip|exe)$ ]]; then
-                : # Extension already present (different from ext)
-            else
-                compat="${compat}.${ext_value}"
-            fi
+        if [[ "$compat_pattern" == *'${ext}'* || "$compat_pattern" == *'${EXT}'* ]]; then
+            : # Extension explicitly controlled by pattern
+        else
+            compat=$(_an_append_ext_if_missing "$compat" "$ext_value")
         fi
     else
         # Default compat: no version
@@ -367,6 +518,10 @@ artifact_naming_validate() {
         config_norm=$(_an_normalize_pattern "$config_pattern")
         config_norm="${config_norm%.tar.gz}"
         config_norm="${config_norm%.zip}"
+        case "$config_norm" in
+            *'.${ext}') config_norm="${config_norm%'.${ext}'}" ;;
+            *'.${EXT}') config_norm="${config_norm%'.${EXT}'}" ;;
+        esac
         _an_log_debug "Config pattern normalized: $config_norm"
     fi
 
@@ -464,6 +619,121 @@ _an_derive_compat_from_versioned() {
     echo "$compat"
 }
 
+# Score a pattern for selection (higher is better)
+_an_score_pattern() {
+    local pattern="$1"
+    local score=0
+
+    # Prefer patterns that include version and target dimensions
+    [[ "$pattern" == *'${version}'* ]] && score=$((score + 4))
+    [[ "$pattern" == *'${os}'* ]] && score=$((score + 2))
+    [[ "$pattern" == *'${arch}'* ]] && score=$((score + 2))
+    [[ "$pattern" == *'${target}'* ]] && score=$((score + 1))
+    [[ "$pattern" == *'${target_triple}'* ]] && score=$((score + 2))
+    [[ "$pattern" == *'${name}'* ]] && score=$((score + 1))
+
+    echo "$score"
+}
+
+# Choose best pattern from a JSON array of patterns
+_an_choose_workflow_pattern() {
+    local patterns_json="$1"
+    local best=""
+    local best_score=-1
+
+    while IFS= read -r pattern; do
+        [[ -z "$pattern" ]] && continue
+        local score
+        score=$(_an_score_pattern "$pattern")
+        if [[ "$score" -gt "$best_score" ]]; then
+            best="$pattern"
+            best_score="$score"
+        fi
+    done < <(echo "$patterns_json" | jq -r '.[]?' 2>/dev/null)
+
+    [[ -n "$best" ]] && echo "$best"
+}
+
+# Get the versioned naming pattern for a tool using precedence:
+# 1. Explicit artifact_naming from config
+# 2. Workflow-derived patterns (choose best)
+# 3. Default ${name}-${version}-${os}-${arch}
+#
+# Args: tool_name local_repo_path [workflow_path]
+# Output: Pattern (stdout) or empty
+# Exit: 0 on success
+artifact_naming_get_versioned_pattern() {
+    local tool="$1"
+    local repo_path="${2:-}"
+    local workflow_path="${3:-}"
+
+    _an_log_debug "Getting versioned pattern for: $tool"
+
+    local pattern
+    pattern=$(config_get_artifact_naming "$tool" 2>/dev/null || echo "")
+    if [[ -n "$pattern" ]]; then
+        local config_norm default_norm
+        config_norm=$(_an_normalize_pattern "$pattern")
+        default_norm=$(_an_normalize_pattern '${name}-${version}-${os}-${arch}')
+        if [[ "$config_norm" != "$default_norm" ]]; then
+            _an_log_info "Using artifact_naming from config: $pattern"
+            echo "$pattern"
+            return 0
+        fi
+    fi
+
+    if [[ -z "$workflow_path" ]]; then
+        workflow_path=$(config_get_tool_field "$tool" "workflow" "" 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$workflow_path" && -n "$repo_path" ]]; then
+        local full_path="$repo_path/$workflow_path"
+        if [[ -f "$full_path" ]]; then
+            local patterns_json
+            patterns_json=$(artifact_naming_parse_workflow "$full_path" 2>/dev/null || echo "[]")
+            local chosen
+            chosen=$(_an_choose_workflow_pattern "$patterns_json")
+            if [[ -n "$chosen" ]]; then
+                _an_log_info "Using workflow-derived pattern: $chosen"
+                echo "$chosen"
+                return 0
+            fi
+        else
+            _an_log_debug "Workflow file not found for pattern resolution: $full_path"
+        fi
+    fi
+
+    # Fallback: GoReleaser config (common for Go projects)
+    if [[ -n "$repo_path" ]]; then
+        local goreleaser_path=""
+        for candidate in ".goreleaser.yml" ".goreleaser.yaml" "goreleaser.yml" "goreleaser.yaml"; do
+            if [[ -f "$repo_path/$candidate" ]]; then
+                goreleaser_path="$repo_path/$candidate"
+                break
+            fi
+        done
+        if [[ -n "$goreleaser_path" ]]; then
+            local goreleaser_pattern
+            goreleaser_pattern=$(artifact_naming_parse_goreleaser "$goreleaser_path" 2>/dev/null || echo "")
+            if [[ -n "$goreleaser_pattern" ]]; then
+                _an_log_info "Using goreleaser-derived pattern: $goreleaser_pattern"
+                echo "$goreleaser_pattern"
+                return 0
+            fi
+        fi
+    fi
+
+    if [[ -n "$pattern" ]]; then
+        _an_log_info "Using default artifact_naming from config: $pattern"
+        echo "$pattern"
+        return 0
+    fi
+
+    _an_log_debug "No versioned pattern found for $tool, using default"
+    echo ""
+    return 0
+}
+
 # Substitute variables in a naming pattern
 # Args: pattern tool version os arch ext
 # Output: Substituted string (stdout)
@@ -478,6 +748,29 @@ artifact_naming_substitute() {
     local result="$pattern"
     local version_stripped="${version#v}"
 
+    # Ensure config helpers are available (for arch alias + target triple)
+    if ! declare -F config_get_arch_alias &>/dev/null; then
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        # shellcheck source=./config.sh
+        source "$script_dir/config.sh" 2>/dev/null || true
+    fi
+
+    local arch_resolved="$arch"
+    if declare -F config_get_arch_alias &>/dev/null; then
+        local arch_alias
+        arch_alias=$(config_get_arch_alias "$tool" "$arch" 2>/dev/null || echo "")
+        [[ -n "$arch_alias" ]] && arch_resolved="$arch_alias"
+    fi
+
+    local target_triple=""
+    if declare -F config_get_target_triple &>/dev/null; then
+        target_triple=$(config_get_target_triple "$tool" "${os}/${arch}" 2>/dev/null || echo "")
+    fi
+    [[ -z "$target_triple" ]] && target_triple=$(_an_default_target_triple "$os" "$arch")
+
+    local target="${os}-${arch_resolved}"
+
     result="${result//\$\{name\}/$tool}"
     result="${result//\$\{NAME\}/$tool}"
     result="${result//\$\{tool\}/$tool}"
@@ -490,11 +783,17 @@ artifact_naming_substitute() {
 
     result="${result//\$\{os\}/$os}"
     result="${result//\$\{OS\}/$os}"
-    result="${result//\$\{arch\}/$arch}"
-    result="${result//\$\{ARCH\}/$arch}"
+    result="${result//\$\{goos\}/$os}"
+    result="${result//\$\{GOOS\}/$os}"
+    result="${result//\$\{arch\}/$arch_resolved}"
+    result="${result//\$\{ARCH\}/$arch_resolved}"
+    result="${result//\$\{goarch\}/$arch_resolved}"
+    result="${result//\$\{GOARCH\}/$arch_resolved}"
 
-    result="${result//\$\{target\}/${os}-${arch}}"
-    result="${result//\$\{TARGET\}/${os}-${arch}}"
+    result="${result//\$\{target\}/$target}"
+    result="${result//\$\{TARGET\}/$target}"
+    result="${result//\$\{target_triple\}/$target_triple}"
+    result="${result//\$\{TARGET_TRIPLE\}/$target_triple}"
 
     # Replace extension placeholders; handle ".${ext}" before bare "${ext}"
     result="${result//\.\$\{ext\}/.${ext}}"
@@ -527,35 +826,38 @@ artifact_naming_get_compat_pattern() {
         source "$script_dir/config.sh" 2>/dev/null || true
     fi
 
-    # Priority 1: Auto-detect from install_script_path
+    # Explicit install_script_compat (highest priority)
     local explicit_compat
     explicit_compat=$(config_get_install_script_compat "$tool" 2>/dev/null || echo "")
 
+    local detected_pattern=""
     local install_path
     install_path=$(config_get_install_script_path "$tool" 2>/dev/null || echo "")
     if [[ -n "$install_path" && -n "$repo_path" ]]; then
         local full_path="$repo_path/$install_path"
         if [[ -f "$full_path" ]]; then
-            local detected_pattern
-            detected_pattern=$(artifact_naming_parse_install_script "$full_path")
+            detected_pattern=$(artifact_naming_parse_install_script "$full_path" "$tool")
             if [[ -n "$detected_pattern" ]]; then
                 if [[ -n "$explicit_compat" && "$explicit_compat" != "$detected_pattern" ]]; then
-                    _an_log_warn "install_script_compat differs from install.sh; using install.sh pattern: $detected_pattern"
+                    _an_log_warn "install_script_compat differs from install.sh; using explicit override: $explicit_compat"
                 else
                     _an_log_info "Auto-detected pattern from install.sh: $detected_pattern"
                 fi
-                echo "$detected_pattern"
-                return 0
             fi
         else
             _an_log_debug "Install script not found at: $full_path"
         fi
     fi
 
-    # Priority 2: Explicit install_script_compat
     if [[ -n "$explicit_compat" ]]; then
         _an_log_info "Using explicit install_script_compat: $explicit_compat"
         echo "$explicit_compat"
+        return 0
+    fi
+
+    # Auto-detect from install_script_path (fallback)
+    if [[ -n "$detected_pattern" ]]; then
+        echo "$detected_pattern"
         return 0
     fi
 
@@ -610,12 +912,16 @@ artifact_naming_generate_dual_for_tool() {
     local compat_pattern
     compat_pattern=$(artifact_naming_get_compat_pattern "$tool" "$repo_path")
 
+    # Get versioned pattern using precedence logic
+    local versioned_pattern
+    versioned_pattern=$(artifact_naming_get_versioned_pattern "$tool" "$repo_path")
+
     # Generate dual names
-    artifact_naming_generate_dual "$naming_name" "$version" "$os" "$arch" "$ext" "$compat_pattern"
+    artifact_naming_generate_dual "$naming_name" "$version" "$os" "$arch" "$ext" "$compat_pattern" "$versioned_pattern"
 }
 
 # Export functions
-export -f artifact_naming_parse_install_script artifact_naming_parse_workflow
+export -f artifact_naming_parse_install_script artifact_naming_parse_workflow artifact_naming_parse_goreleaser
 export -f artifact_naming_generate_dual artifact_naming_validate
 export -f artifact_naming_substitute
-export -f artifact_naming_get_compat_pattern artifact_naming_generate_dual_for_tool
+export -f artifact_naming_get_compat_pattern artifact_naming_get_versioned_pattern artifact_naming_generate_dual_for_tool

@@ -722,6 +722,7 @@ gh_upload_asset_dual() {
     local content_type="application/octet-stream"
     case "$ext" in
         tar.gz|tgz) content_type="application/gzip" ;;
+        tar.xz) content_type="application/x-xz" ;;
         zip) content_type="application/zip" ;;
     esac
 

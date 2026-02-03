@@ -201,7 +201,7 @@ test_tar_variable_simple() {
     result=$(artifact_naming_parse_install_script "$FIXTURE_DIR/simple_install.sh")
     log_debug "Raw output: '$result'"
 
-    assert_eq 'mytool-${os}-${arch}' "$result" "Simple TAR pattern extraction"
+    assert_eq 'mytool-${target}' "$result" "Simple TAR pattern extraction"
 }
 
 test_tar_variable_cass_style() {
@@ -212,7 +212,7 @@ test_tar_variable_cass_style() {
     result=$(artifact_naming_parse_install_script "$FIXTURE_DIR/cass_style_install.sh")
     log_debug "Raw output: '$result'"
 
-    assert_eq 'cass-${os}-${arch}' "$result" "CASS-style TAR pattern"
+    assert_eq 'cass-${target}' "$result" "CASS-style TAR pattern"
 }
 
 test_tar_variable_with_ext() {
@@ -223,7 +223,7 @@ test_tar_variable_with_ext() {
     result=$(artifact_naming_parse_install_script "$FIXTURE_DIR/ext_variable.sh")
     log_debug "Raw output: '$result'"
 
-    assert_eq 'exttool-${os}-${arch}' "$result" "TAR with EXT variable normalized"
+    assert_eq 'exttool-${target}' "$result" "TAR with EXT variable normalized"
 }
 
 test_tar_variable_case_statement() {
@@ -234,7 +234,7 @@ test_tar_variable_case_statement() {
     result=$(artifact_naming_parse_install_script "$FIXTURE_DIR/case_statement.sh")
     log_debug "Raw output: '$result'"
 
-    assert_eq 'casetool-${os}-${arch}' "$result" "TAR pattern with case statement context"
+    assert_eq 'casetool-${target}' "$result" "TAR pattern with case statement context"
 }
 
 # =============================================================================
@@ -262,7 +262,7 @@ test_asset_name_uppercase() {
     result=$(artifact_naming_parse_install_script "$FIXTURE_DIR/uppercase_asset_name.sh")
     log_debug "Raw output: '$result'"
 
-    assert_eq 'uppertool-${os}-${arch}' "$result" "ASSET_NAME uppercase pattern"
+    assert_eq 'uppertool-${target}' "$result" "ASSET_NAME uppercase pattern"
 }
 
 # =============================================================================
@@ -296,7 +296,7 @@ test_normalize_target_to_os_arch() {
     log_debug "Normalized pattern: '$result'"
 
     # TARGET should become ${os}-${arch}
-    assert_contains "$result" '${os}-${arch}' "TARGET normalized to os-arch"
+    assert_contains "$result" '${target}' "TARGET normalized to target"
 }
 
 test_normalize_goos_goarch() {

@@ -47,7 +47,7 @@ checks:
   - go test -race ./...
 
 # Artifact naming pattern
-artifact_naming: "${name}-${version}-${os}-${arch}"
+artifact_naming: "${name}_${version}_${os}_${arch}"
 
 # Archive format
 archive_format:

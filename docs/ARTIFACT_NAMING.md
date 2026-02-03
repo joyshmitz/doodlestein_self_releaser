@@ -8,6 +8,8 @@ This document defines the standard artifact naming scheme for dsr builds.
 {tool}-{version}-{os}-{arch}[.exe][.archive]
 ```
 
+Note: dsr can derive naming from workflows (GoReleaser `name_template`, GitHub Actions `matrix.target`). Underscores and target triples are supported; the default format above is a fallback.
+
 ### Components
 
 | Component | Format | Examples |
@@ -17,7 +19,7 @@ This document defines the standard artifact naming scheme for dsr builds.
 | os | lowercase | `linux`, `darwin`, `windows` |
 | arch | lowercase | `amd64`, `arm64`, `386` |
 | .exe | Windows only | (suffix for Windows binaries) |
-| .archive | optional | `.tar.gz`, `.zip` |
+| .archive | optional | `.tar.gz`, `.tar.xz`, `.zip` |
 
 ### Examples
 
@@ -33,6 +35,12 @@ ntm-v1.2.3-windows-amd64.exe
 ntm-v1.2.3-linux-amd64.tar.gz
 ntm-v1.2.3-darwin-arm64.tar.gz
 ntm-v1.2.3-windows-amd64.zip
+```
+
+**Target triple / underscore variants (workflow-derived):**
+```
+br-v1.2.3-linux_amd64.tar.gz
+dcg-x86_64-unknown-linux-gnu.tar.xz
 ```
 
 ## Checksum Files
@@ -194,6 +202,15 @@ artifact_naming: "${name}-${version}-${os}_${arch}"
 # Option 1: Explicit compat pattern (recommended for edge cases)
 install_script_compat: "${name}-${os}-${arch}"
 
+# Optional: target triple overrides (for workflows using matrix.target)
+target_triples:
+  linux/amd64: x86_64-unknown-linux-gnu
+  darwin/arm64: aarch64-apple-darwin
+
+# Optional: arch aliases for install.sh compat (amd64 -> x86_64)
+arch_aliases:
+  amd64: x86_64
+
 # Option 2: Auto-detect from install.sh (recommended for most cases)
 install_script_path: install.sh
 ```
@@ -216,7 +233,8 @@ Patterns support these variables:
 | `${version}` | Version (stripped of 'v' prefix) | `0.1.64` |
 | `${os}` | Operating system | `darwin` |
 | `${arch}` | Architecture | `arm64` |
-| `${target}` | Combined os-arch | `darwin-arm64` |
+| `${target}` | Combined os-arch (after arch aliases) | `darwin-arm64` |
+| `${target_triple}` | Full target triple | `x86_64-unknown-linux-gnu` |
 | `${ext}` | File extension | `.tar.gz` |
 
 ### Examples
@@ -224,14 +242,17 @@ Patterns support these variables:
 **Versioned downloads (explicit version):**
 ```
 cass-0.1.64-darwin_arm64.tar.gz
-rch-1.0.1-linux-amd64.tar.gz
+rch-1.0.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 **Install.sh compatible (unversioned):**
 ```
 cass-darwin-arm64.tar.gz
-rch-linux-amd64.tar.gz
+rch-linux-x86_64.tar.gz
 ```
+
+If the compat pattern has **no archive extension**, dsr treats it as a raw binary alias
+(e.g., `ntm_darwin_arm64`), copying the built binary instead of an archive.
 
 ### Checksums
 
@@ -254,7 +275,8 @@ dsr repos validate --repo cass
 
 ## Validation
 
-Artifact names can be validated against the regex:
+Artifact names can be validated against the regex below for the default hyphenated pattern.
+Workflow-derived patterns (underscores, target triples) may not match this regex.
 ```regex
 ^[a-z][a-z0-9_-]+-v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?-(linux|darwin|windows)-(amd64|arm64|386)(\.exe)?(\.tar\.gz|\.zip)?$
 ```

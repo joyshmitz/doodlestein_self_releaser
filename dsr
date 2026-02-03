@@ -2082,6 +2082,104 @@ EOF
         extra_manifest_entries+=("$artifact_json")
     }
 
+    _build_emit_compat_alias() {
+        local src_path="$1"
+        local compat_name="$2"
+        local output_dir="$3"
+        local target="$4"
+        local format="$5"
+
+        [[ -z "$compat_name" || -z "$src_path" || ! -f "$src_path" ]] && return 0
+
+        local src_name
+        src_name=$(basename "$src_path")
+        if [[ "$compat_name" == "$src_name" ]]; then
+            return 0
+        fi
+
+        local compat_path="$output_dir/$compat_name"
+        if [[ -f "$compat_path" ]]; then
+            if cmp -s "$compat_path" "$src_path" 2>/dev/null; then
+                log_info "Compat alias already present: $compat_name"
+                return 0
+            fi
+            log_warn "Compat alias exists with different content: $compat_name"
+            return 1
+        fi
+
+        if cp "$src_path" "$compat_path"; then
+            log_info "Created compat alias: $compat_name"
+            _build_manifest_add_entry "$compat_path" "$target" "$format"
+            return 0
+        fi
+
+        log_warn "Failed to create compat alias: $compat_name"
+        return 1
+    }
+
+    _build_is_archive_ext() {
+        local name="$1"
+        case "$name" in
+            *.tar.gz|*.tgz|*.tar.xz|*.zip) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    _build_emit_binary_alias() {
+        local src_path="$1"
+        local compat_name="$2"
+        local output_dir="$3"
+        local target="$4"
+
+        [[ -z "$src_path" || -z "$compat_name" ]] && return 0
+
+        local compat_path="$output_dir/$compat_name"
+        if [[ -f "$compat_path" ]]; then
+            if cmp -s "$compat_path" "$src_path" 2>/dev/null; then
+                log_info "Binary alias already present: $compat_name"
+                return 0
+            fi
+            log_warn "Binary alias exists with different content: $compat_name"
+            return 1
+        fi
+
+        if cp "$src_path" "$compat_path"; then
+            log_info "Created binary alias: $compat_name"
+            _build_manifest_add_entry "$compat_path" "$target" "binary"
+            return 0
+        fi
+
+        log_warn "Failed to create binary alias: $compat_name"
+        return 1
+    }
+
+    _build_find_manifest_artifact() {
+        local manifest_file="$1"
+        local output_dir="$2"
+        local target="$3"
+        local format="$4"
+
+        if [[ -f "$manifest_file" ]]; then
+            local name
+            name=$(jq -r --arg t "$target" --arg f "$format" '
+                .artifacts[]? | select(.target == $t) | select(.archive_format == $f) | .name
+            ' "$manifest_file" 2>/dev/null | head -1)
+            if [[ -n "$name" && -f "$output_dir/$name" ]]; then
+                echo "$output_dir/$name"
+                return 0
+            fi
+
+            name=$(jq -r --arg t "$target" '
+                .artifacts[]? | select(.target == $t) | .name
+            ' "$manifest_file" 2>/dev/null | head -1)
+            if [[ -n "$name" && -f "$output_dir/$name" ]]; then
+                echo "$output_dir/$name"
+                return 0
+            fi
+        fi
+        return 1
+    }
+
     _build_get_archive_format() {
         local tool="$1"
         local os="$2"
@@ -2151,6 +2249,7 @@ EOF
         case "$compat_pattern" in
             *".tar.gz") echo "tar.gz" ;;
             *".tgz") echo "tgz" ;;
+            *".tar.xz") echo "tar.xz" ;;
             *".zip") echo "zip" ;;
             *".exe") echo "exe" ;;
             *) echo "" ;;
@@ -2180,6 +2279,7 @@ EOF
         case "$pattern" in
             *".tar.gz") echo "tar.gz" ;;
             *".tgz") echo "tgz" ;;
+            *".tar.xz") echo "tar.xz" ;;
             *".zip") echo "zip" ;;
             *".exe") echo "exe" ;;
             *) return 0 ;;
@@ -2229,7 +2329,7 @@ EOF
         if [[ -z "$compat_ext" ]]; then
             compat_ext=$(_build_detect_install_ext "$tool" "$repo_path")
         fi
-        if [[ -n "$compat_ext" ]]; then
+        if [[ -n "$compat_ext" && "$format" != "binary" ]]; then
             if [[ "$compat_ext" == "exe" ]]; then
                 format="none"
             elif [[ "$format" != "$compat_ext" ]]; then
@@ -2248,9 +2348,17 @@ EOF
             return 0
         fi
 
+        local naming_ext="$format"
+        if [[ "$format" == "binary" ]]; then
+            naming_ext=""
+            [[ "$os" == "windows" ]] && naming_ext="exe"
+        fi
+
         local names_json versioned_name
-        names_json=$(artifact_naming_generate_dual_for_tool "$tool" "$version" "$os" "$arch" "$format" "$repo_path" 2>/dev/null || echo "")
+        names_json=$(artifact_naming_generate_dual_for_tool "$tool" "$version" "$os" "$arch" "$naming_ext" "$repo_path" 2>/dev/null || echo "")
         versioned_name=$(echo "$names_json" | jq -r '.versioned // empty' 2>/dev/null)
+        local compat_name
+        compat_name=$(echo "$names_json" | jq -r '.compat // empty' 2>/dev/null)
         if [[ -z "$versioned_name" ]]; then
             log_warn "Unable to resolve archive name for $tool $target ($format)"
             return 0
@@ -2272,6 +2380,22 @@ EOF
             include_files+=("$include")
         done < <(_build_get_include_files "$tool" 2>/dev/null)
 
+        if [[ "$format" == "binary" ]]; then
+            if [[ -f "$archive_path" ]]; then
+                log_warn "Overwriting existing binary asset: $archive_path"
+            fi
+            if cp "$binary_path" "$archive_path"; then
+                chmod +x "$archive_path" 2>/dev/null || true
+                _build_manifest_add_entry "$archive_path" "$target" "binary"
+                if [[ -n "$compat_name" && "$compat_name" != "$versioned_name" ]]; then
+                    _build_emit_binary_alias "$binary_path" "$compat_name" "$output_dir" "$target"
+                fi
+            else
+                log_error "Failed to create binary asset: $archive_path"
+            fi
+            return 0
+        fi
+
         if [[ "$format" == "tar.gz" || "$format" == "tgz" ]]; then
             if [[ -f "$archive_path" ]]; then
                 log_warn "Overwriting existing archive: $archive_path"
@@ -2289,6 +2413,43 @@ EOF
             fi
             if tar "${tar_args[@]}"; then
                 _build_manifest_add_entry "$archive_path" "$target" "$format"
+                if [[ -n "$compat_name" ]]; then
+                    if _build_is_archive_ext "$compat_name"; then
+                        _build_emit_compat_alias "$archive_path" "$compat_name" "$output_dir" "$target" "$format"
+                    else
+                        _build_emit_binary_alias "$binary_path" "$compat_name" "$output_dir" "$target"
+                    fi
+                fi
+            else
+                log_error "Failed to create archive: $archive_path"
+            fi
+            return 0
+        fi
+
+        if [[ "$format" == "tar.xz" ]]; then
+            if [[ -f "$archive_path" ]]; then
+                log_warn "Overwriting existing archive: $archive_path"
+            fi
+            local -a tar_args=()
+            tar_args=(-cJf "$archive_path" -C "$output_dir" "$(basename "$binary_path")")
+            if [[ -n "$repo_path" ]]; then
+                for include in "${include_files[@]}"; do
+                    if [[ -f "$repo_path/$include" ]]; then
+                        tar_args+=(-C "$repo_path" "$include")
+                    else
+                        log_warn "Include file not found for $tool: $include"
+                    fi
+                done
+            fi
+            if tar "${tar_args[@]}"; then
+                _build_manifest_add_entry "$archive_path" "$target" "$format"
+                if [[ -n "$compat_name" ]]; then
+                    if _build_is_archive_ext "$compat_name"; then
+                        _build_emit_compat_alias "$archive_path" "$compat_name" "$output_dir" "$target" "$format"
+                    else
+                        _build_emit_binary_alias "$binary_path" "$compat_name" "$output_dir" "$target"
+                    fi
+                fi
             else
                 log_error "Failed to create archive: $archive_path"
             fi
@@ -2315,6 +2476,13 @@ EOF
             fi
             if zip -j -q -FS "$archive_path" "${zip_inputs[@]}"; then
                 _build_manifest_add_entry "$archive_path" "$target" "$format"
+                if [[ -n "$compat_name" ]]; then
+                    if _build_is_archive_ext "$compat_name"; then
+                        _build_emit_compat_alias "$archive_path" "$compat_name" "$output_dir" "$target" "$format"
+                    else
+                        _build_emit_binary_alias "$binary_path" "$compat_name" "$output_dir" "$target"
+                    fi
+                fi
             else
                 log_error "Failed to create archive: $archive_path"
             fi
@@ -2372,6 +2540,7 @@ EOF
                 [[ -z "$target" || -z "$artifact_path" ]] && continue
                 case "$artifact_path" in
                     *.tar.gz|*.tgz) existing_archive_formats["$target"]="tar.gz" ;;
+                    *.tar.xz) existing_archive_formats["$target"]="tar.xz" ;;
                     *.zip) existing_archive_formats["$target"]="zip" ;;
                 esac
             done < <(echo "$result_json" | jq -r '.targets[]? | [.target, (.artifact_path // .artifact // "")] | @tsv' 2>/dev/null)
@@ -2379,6 +2548,71 @@ EOF
 
         for target in "${targets[@]}"; do
             log_info "Packaging installer archive for $tool $target"
+            local os arch format names_json versioned_name compat_name
+            os="${target%/*}"
+            arch="${target#*/}"
+            format=$(_build_get_archive_format "$tool" "$os")
+
+            local compat_ext
+            compat_ext=$(_build_detect_compat_ext "$tool" "$repo_path")
+            if [[ -z "$compat_ext" ]]; then
+                compat_ext=$(_build_detect_install_ext "$tool" "$repo_path")
+            fi
+            if [[ -n "$compat_ext" && "$format" != "binary" ]]; then
+                if [[ "$compat_ext" == "exe" ]]; then
+                    format="none"
+                elif [[ "$format" != "$compat_ext" ]]; then
+                    format="$compat_ext"
+                fi
+            fi
+
+            local naming_ext="$format"
+            if [[ "$format" == "binary" ]]; then
+                naming_ext=""
+                [[ "$os" == "windows" ]] && naming_ext="exe"
+            fi
+
+            names_json=$(artifact_naming_generate_dual_for_tool "$tool" "$version" "$os" "$arch" "$naming_ext" "$repo_path" 2>/dev/null || echo "")
+            versioned_name=$(echo "$names_json" | jq -r '.versioned // empty' 2>/dev/null)
+            compat_name=$(echo "$names_json" | jq -r '.compat // empty' 2>/dev/null)
+
+            local existing_format="${existing_archive_formats[$target]:-}"
+            if [[ -z "$existing_format" && -n "$versioned_name" && -f "$output_dir/$versioned_name" ]]; then
+                existing_format="$format"
+                existing_archive_formats["$target"]="$format"
+            fi
+            if [[ -n "$existing_format" && "$existing_format" == "$format" ]]; then
+                local existing_path=""
+                if [[ -n "$versioned_name" && -f "$output_dir/$versioned_name" ]]; then
+                    existing_path="$output_dir/$versioned_name"
+                else
+                    existing_path=$(_build_find_manifest_artifact "$manifest_file" "$output_dir" "$target" "$format" 2>/dev/null || echo "")
+                fi
+
+                if [[ -n "$existing_path" ]]; then
+                    if [[ "$format" == "binary" ]]; then
+                        _build_emit_binary_alias "$existing_path" "$compat_name" "$output_dir" "$target"
+                    elif [[ -n "$compat_name" ]]; then
+                        if _build_is_archive_ext "$compat_name"; then
+                            _build_emit_compat_alias "$existing_path" "$compat_name" "$output_dir" "$target" "$format"
+                        else
+                            local binary_path
+                            binary_path=$(_build_find_binary "$output_dir" "$binary_name" "$os" 2>/dev/null || echo "")
+                            if [[ -n "$binary_path" ]]; then
+                                _build_emit_binary_alias "$binary_path" "$compat_name" "$output_dir" "$target"
+                            else
+                                log_warn "Binary not found for $tool $target to create compat alias"
+                            fi
+                        fi
+                    fi
+                else
+                    log_warn "No existing artifact found for $tool $target to create compat alias"
+                fi
+
+                log_info "Archive already produced for $tool $target ($format); skipping packaging"
+                continue
+            fi
+
             _build_package_archive_for_target "$tool" "$version" "$target" "$output_dir" "$repo_path" "$binary_name"
         done
     }
@@ -3223,6 +3457,7 @@ EOF
         local content_type="application/octet-stream"
         case "$filename" in
             *.tar.gz|*.tgz) content_type="application/gzip" ;;
+            *.tar.xz) content_type="application/x-xz" ;;
             *.zip) content_type="application/zip" ;;
             *.json) content_type="application/json" ;;
             *.txt) content_type="text/plain" ;;
@@ -3240,6 +3475,7 @@ EOF
                 case "$filename" in
                     *.tar.gz) ext="tar.gz" ;;
                     *.tgz) ext="tgz" ;;
+                    *.tar.xz) ext="tar.xz" ;;
                     *.zip) ext="zip" ;;
                     *.exe) ext="exe" ;;
                     *) ext="" ;;
@@ -4779,11 +5015,36 @@ _dsr_render_artifact_name() {
     local ext="$7"
 
     local rendered="$pattern"
+    local arch_resolved="$arch"
+    local arch_alias=""
+    if declare -F config_get_arch_alias &>/dev/null; then
+        arch_alias=$(config_get_arch_alias "$name" "$arch" 2>/dev/null || echo "")
+        [[ -n "$arch_alias" ]] && arch_resolved="$arch_alias"
+    fi
+
+    local target_triple=""
+    if declare -F config_get_target_triple &>/dev/null; then
+        target_triple=$(config_get_target_triple "$name" "${os}/${arch}" 2>/dev/null || echo "")
+    fi
+    if [[ -z "$target_triple" ]]; then
+        case "$os/$arch" in
+            linux/amd64) target_triple="x86_64-unknown-linux-gnu" ;;
+            linux/arm64) target_triple="aarch64-unknown-linux-gnu" ;;
+            darwin/amd64) target_triple="x86_64-apple-darwin" ;;
+            darwin/arm64) target_triple="aarch64-apple-darwin" ;;
+            windows/amd64) target_triple="x86_64-pc-windows-msvc" ;;
+            *) target_triple="${os}-${arch}" ;;
+        esac
+    fi
+
+    local target="${os}-${arch_resolved}"
     rendered="${rendered//\$\{name\}/$name}"
     rendered="${rendered//\$\{binary\}/$binary}"
     rendered="${rendered//\$\{version\}/$version}"
     rendered="${rendered//\$\{os\}/$os}"
-    rendered="${rendered//\$\{arch\}/$arch}"
+    rendered="${rendered//\$\{arch\}/$arch_resolved}"
+    rendered="${rendered//\$\{target\}/$target}"
+    rendered="${rendered//\$\{target_triple\}/$target_triple}"
     rendered="${rendered//\$\{ext\}/$ext}"
 
     echo "$rendered"
