@@ -391,10 +391,19 @@ _hh_check_disk_space() {
     local hostname="$1"
     local connection="$2"
     local ssh_host="$3"
+    local platform="${4:-}"
 
     local df_output
-    df_output=$(_hh_exec_on_host "$hostname" "$connection" "$ssh_host" \
-        "df -P / | tail -1 | awk '{print \$5, \$4}'")
+    if [[ "$platform" == windows/* ]]; then
+        # Use PowerShell for Windows: get C: drive usage percentage and free space in KB
+        df_output=$(_hh_exec_on_host "$hostname" "$connection" "$ssh_host" \
+            "powershell -NoProfile -Command \"\$d=Get-WmiObject Win32_LogicalDisk -Filter \\\"DeviceID='C:'\\\"; [math]::Round(100-(\$d.FreeSpace/\$d.Size*100)); [math]::Round(\$d.FreeSpace/1KB)\"")
+        # Strip Windows CRLF
+        df_output=$(echo "$df_output" | tr -d '\r' | tr '\n' ' ')
+    else
+        df_output=$(_hh_exec_on_host "$hostname" "$connection" "$ssh_host" \
+            "df -P / | tail -1 | awk '{print \$5, \$4}'")
+    fi
 
     if [[ -z "$df_output" ]]; then
         echo '{"path": "/", "usage_percent": null, "available_gb": null, "status": "error", "error": "Failed to get disk info"}'
@@ -425,44 +434,47 @@ _hh_check_toolchains() {
     local connection="$2"
     local ssh_host="$3"
     local capabilities="$4"
+    local platform="${5:-}"
 
     local result="{"
     local first=true
+    local is_windows=false
+    [[ "$platform" == windows/* ]] && is_windows=true
 
     # Check each toolchain based on host capabilities
     for capability in $capabilities; do
         local check_cmd version status
 
-        case "$capability" in
-            rust)
-                check_cmd="rustc --version 2>/dev/null | head -1"
-                ;;
-            go)
-                check_cmd="go version 2>/dev/null | head -1"
-                ;;
-            bun)
-                check_cmd="bun --version 2>/dev/null | head -1"
-                ;;
-            node)
-                check_cmd="node --version 2>/dev/null | head -1"
-                ;;
-            docker)
-                check_cmd="docker --version 2>/dev/null | head -1"
-                ;;
-            act)
-                check_cmd="act --version 2>/dev/null | head -1"
-                ;;
-            *)
-                continue
-                ;;
-        esac
+        if $is_windows; then
+            # Windows commands (no Unix shell redirection/pipes)
+            case "$capability" in
+                rust)   check_cmd="rustc --version" ;;
+                go)     check_cmd="go version" ;;
+                bun)    check_cmd="bun --version" ;;
+                node)   check_cmd="node --version" ;;
+                docker) check_cmd="docker --version" ;;
+                act)    check_cmd="act --version" ;;
+                *)      continue ;;
+            esac
+        else
+            # Unix commands
+            case "$capability" in
+                rust)   check_cmd="rustc --version 2>/dev/null | head -1" ;;
+                go)     check_cmd="go version 2>/dev/null | head -1" ;;
+                bun)    check_cmd="bun --version 2>/dev/null | head -1" ;;
+                node)   check_cmd="node --version 2>/dev/null | head -1" ;;
+                docker) check_cmd="docker --version 2>/dev/null | head -1" ;;
+                act)    check_cmd="act --version 2>/dev/null | head -1" ;;
+                *)      continue ;;
+            esac
+        fi
 
         version=$(_hh_exec_on_host "$hostname" "$connection" "$ssh_host" "$check_cmd")
 
         if [[ -n "$version" ]]; then
             status="ok"
-            # Clean version output (remove newlines, escape quotes)
-            version=$(echo "$version" | tr -d '\n' | sed 's/"/\\"/g')
+            # Clean version output (remove CRLF/newlines, escape quotes)
+            version=$(echo "$version" | tr -d '\r\n' | sed 's/"/\\"/g')
         else
             status="missing"
             version=""
@@ -510,6 +522,7 @@ _hh_check_clock_drift() {
     local hostname="$1"
     local connection="$2"
     local ssh_host="$3"
+    local platform="${4:-}"
 
     local local_time remote_time drift_seconds
 
@@ -519,7 +532,16 @@ _hh_check_clock_drift() {
     fi
 
     local_time=$(date +%s)
-    remote_time=$(_hh_exec_on_host "$hostname" "$connection" "$ssh_host" "date +%s")
+
+    # Use PowerShell for Windows hosts, date +%s for Unix hosts
+    if [[ "$platform" == windows/* ]]; then
+        remote_time=$(_hh_exec_on_host "$hostname" "$connection" "$ssh_host" \
+            "powershell -NoProfile -Command \"[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()\"")
+        # Strip Windows CRLF line endings
+        remote_time=$(echo "$remote_time" | tr -d '\r\n')
+    else
+        remote_time=$(_hh_exec_on_host "$hostname" "$connection" "$ssh_host" "date +%s")
+    fi
 
     if [[ -z "$remote_time" ]]; then
         echo '{"drift_seconds": null, "status": "error", "error": "Failed to get remote time"}'
@@ -632,15 +654,15 @@ host_health_check() {
 
     # Only continue with other checks if host is reachable
     if echo "$connectivity" | jq -e '.reachable' &>/dev/null; then
-        # 2. Check disk space
-        disk_space=$(_hh_check_disk_space "$hostname" "$connection" "$ssh_host")
+        # 2. Check disk space (pass platform for Windows compatibility)
+        disk_space=$(_hh_check_disk_space "$hostname" "$connection" "$ssh_host" "$platform")
         local disk_status
         disk_status=$(echo "$disk_space" | jq -r '.status')
         [[ "$disk_status" == "error" ]] && overall_status="error" && ((errors++))
         [[ "$disk_status" == "warning" ]] && [[ "$overall_status" != "error" ]] && overall_status="warning" && ((warnings++))
 
-        # 3. Check toolchains
-        toolchains=$(_hh_check_toolchains "$hostname" "$connection" "$ssh_host" "$capabilities")
+        # 3. Check toolchains (pass platform for Windows compatibility)
+        toolchains=$(_hh_check_toolchains "$hostname" "$connection" "$ssh_host" "$capabilities" "$platform")
 
         # 4. Check Docker (if host has docker/act capability)
         if [[ "$capabilities" == *"docker"* ]] || [[ "$capabilities" == *"act"* ]]; then
@@ -653,8 +675,8 @@ host_health_check() {
             docker_status='{"running": null, "required": false}'
         fi
 
-        # 5. Check clock drift
-        clock_drift=$(_hh_check_clock_drift "$hostname" "$connection" "$ssh_host")
+        # 5. Check clock drift (pass platform for Windows compatibility)
+        clock_drift=$(_hh_check_clock_drift "$hostname" "$connection" "$ssh_host" "$platform")
         local drift_status
         drift_status=$(echo "$clock_drift" | jq -r '.status')
         [[ "$drift_status" == "warning" ]] && [[ "$overall_status" != "error" ]] && overall_status="warning" && ((warnings++))
