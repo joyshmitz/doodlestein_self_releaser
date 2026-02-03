@@ -188,17 +188,14 @@ build_lock_acquire() {
         now=$(date +%s)
         local age=$((now - lock_ts))
 
-        # Check if lock is stale
-        if [[ $age -gt $BUILD_LOCK_STALE_THRESHOLD ]]; then
-          # Check if process is still alive
-          if ! kill -0 "$lock_pid" 2>/dev/null; then
-            log_warn "Removing stale lock (pid=$lock_pid, age=${age}s)"
-            rm -f "$lock_file"
-          else
-            # Process still alive but lock is old - respect it but warn
-            log_warn "Lock held by active process $lock_pid for ${age}s"
-            return 2
-          fi
+        # Check if process is still alive (clear immediately if not)
+        if ! kill -0 "$lock_pid" 2>/dev/null; then
+          log_warn "Removing stale lock (pid=$lock_pid not running, age=${age}s)"
+          rm -f "$lock_file"
+        elif [[ $age -gt $BUILD_LOCK_STALE_THRESHOLD ]]; then
+          # Process still alive but lock is old - respect it but warn
+          log_warn "Lock held by active process $lock_pid for ${age}s"
+          return 2
         else
           # Lock is recent and valid
           log_warn "Build already locked by pid=$lock_pid (run_id=$lock_run_id)"

@@ -3351,6 +3351,49 @@ EOF
         log_warn "No manifest found, will upload all files in artifacts directory"
     fi
 
+    # Dry-run mode: show planned actions and exit
+    if $DRY_RUN; then
+        log_info "[dry-run] Would execute release:"
+        log_info "  Tool:        $tool_name"
+        log_info "  Version:     $tag"
+        log_info "  Repo:        $repo"
+        log_info "  Artifacts:   $artifacts_dir"
+        log_info "  Manifest:    $($manifest_exists && echo "$manifest_file" || echo "(none)")"
+        log_info "  Draft:       $draft"
+        log_info "  Prerelease:  $prerelease"
+
+        # List files that would be uploaded
+        local file_count=0
+        if $manifest_exists && [[ -f "$manifest_file" ]]; then
+            while IFS= read -r name; do
+                [[ -z "$name" ]] && continue
+                if [[ -f "$artifacts_dir/$name" ]]; then
+                    log_info "  Would upload: $name"
+                    file_count=$((file_count + 1))
+                fi
+            done < <(jq -r '.artifacts[]?.name // .artifacts[]?.filename // empty' "$manifest_file" 2>/dev/null)
+        else
+            while IFS= read -r file; do
+                log_info "  Would upload: $(basename "$file")"
+                file_count=$((file_count + 1))
+            done < <(find "$artifacts_dir" -maxdepth 1 -type f 2>/dev/null)
+        fi
+        log_info "  Total files: $file_count"
+
+        if $JSON_MODE; then
+            json_envelope "release" "dry_run" 0 "$(jq -nc \
+                --arg tool "$tool_name" \
+                --arg version "$tag" \
+                --arg repo "$repo" \
+                --arg artifacts_dir "$artifacts_dir" \
+                --argjson draft "$draft" \
+                --argjson prerelease "$prerelease" \
+                --argjson file_count "$file_count" \
+                '{tool: $tool, version: $version, repo: $repo, artifacts_dir: $artifacts_dir, draft: $draft, prerelease: $prerelease, file_count: $file_count, mode: "dry_run"}')"
+        fi
+        return 0
+    fi
+
     # Record start time
     local start_time
     start_time=$(date +%s)
@@ -3463,9 +3506,13 @@ EOF
     fi
 
     local already_uploaded=()
+    local -A uploaded_name_set=()
     if $resume && [[ -f "$upload_state_file" ]]; then
         while IFS= read -r name; do
-            [[ -n "$name" ]] && already_uploaded+=("$name")
+            if [[ -n "$name" ]]; then
+                already_uploaded+=("$name")
+                uploaded_name_set["$name"]=1
+            fi
         done < <(jq -r '.uploaded[]?.name // empty' "$upload_state_file" 2>/dev/null)
         log_info "Resuming: ${#already_uploaded[@]} file(s) already uploaded"
     fi
@@ -3635,16 +3682,23 @@ EOF
 
                     local upload_name
                     for upload_name in "${upload_names[@]}"; do
+                        if [[ -n "${uploaded_name_set[$upload_name]:-}" ]]; then
+                            log_info "  Skipping (already handled in this run): $upload_name"
+                            skipped_assets+=("$upload_name")
+                            continue
+                        fi
                         local name_pattern=" $upload_name "
                         if [[ " ${already_uploaded[*]} " =~ $name_pattern ]]; then
                             log_info "  Skipping (already uploaded): $upload_name"
                             skipped_assets+=("$upload_name")
+                            uploaded_name_set["$upload_name"]=1
                             continue
                         fi
                         if _release_delete_asset "$upload_name"; then
                             if gh_upload_asset_named "$upload_url" "$file" "$upload_name" "$content_type" 2>&1; then
                                 log_ok "  Uploaded: $upload_name ($size_bytes bytes)"
                                 _release_record_uploaded "$upload_name" "uploaded" "$size_bytes" "$content_type"
+                                uploaded_name_set["$upload_name"]=1
                             else
                                 local upload_error="Upload failed for $upload_name"
                                 log_error "  $upload_error"
@@ -3660,10 +3714,16 @@ EOF
         fi
 
         # Skip if already uploaded (resume mode or already in release)
+        if [[ -n "${uploaded_name_set[$filename]:-}" ]]; then
+            log_info "[$idx/$total_files] Skipping (already handled in this run): $filename"
+            skipped_assets+=("$filename")
+            continue
+        fi
         local filename_pattern=" $filename "
         if [[ " ${already_uploaded[*]} " =~ $filename_pattern ]]; then
             log_info "[$idx/$total_files] Skipping (already uploaded): $filename"
             skipped_assets+=("$filename")
+            uploaded_name_set["$filename"]=1
             continue
         fi
 
@@ -3675,6 +3735,7 @@ EOF
             if upload_result=$(gh_upload_asset "$upload_url" "$file" "$content_type" 2>&1); then
                 log_ok "  Uploaded: $filename ($size_bytes bytes)"
                 _release_record_uploaded "$filename" "uploaded" "$size_bytes" "$content_type"
+                uploaded_name_set["$filename"]=1
             else
                 log_error "  Failed to upload: $filename"
                 log_error "  Error: $upload_result"

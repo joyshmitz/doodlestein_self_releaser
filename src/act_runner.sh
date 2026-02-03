@@ -268,6 +268,15 @@ act_run_workflow() {
         _log_info "Injecting tag context: $tag"
     fi
 
+    # Ensure USER is set inside act containers (some workflows rely on it)
+    if [[ -n "${USER:-}" ]]; then
+        act_cmd+=(--env "USER=$USER")
+    else
+        local fallback_user
+        fallback_user=$(id -un 2>/dev/null || echo "runner")
+        act_cmd+=(--env "USER=$fallback_user")
+    fi
+
     # Add any extra arguments
     if [[ ${#extra_args[@]} -gt 0 ]]; then
         act_cmd+=("${extra_args[@]}")

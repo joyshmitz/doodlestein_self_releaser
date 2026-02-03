@@ -276,7 +276,8 @@ config_get() {
     local key="$1"
     local default="${2:-}"
 
-    if [[ -v "DSR_CONFIG[$key]" ]]; then
+    # Use ${var+x} pattern for Bash 4.0+ compatibility (avoids -v operator from 4.3+)
+    if [[ -n "${DSR_CONFIG[$key]+x}" ]]; then
         echo "${DSR_CONFIG[$key]}"
     else
         echo "$default"
