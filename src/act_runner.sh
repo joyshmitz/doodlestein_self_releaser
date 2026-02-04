@@ -1394,7 +1394,8 @@ act_run_native_build() {
         # build_env is newline-delimited to preserve values with spaces
         while IFS= read -r env_pair; do
             [[ -z "$env_pair" ]] && continue
-            env_exports+="export $env_pair; "
+            # Quote the env_pair to handle values with spaces (e.g., FOO="bar baz")
+            env_exports+="export \"$env_pair\"; "
         done <<< "$build_env"
         remote_cmd="cd '${remote_path//\'/\'\\\'\'}' && $env_exports$build_cmd"
     fi
